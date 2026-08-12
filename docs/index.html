@@ -18,7 +18,12 @@
 html,body{margin:0;padding:0;background:var(--bg);color:var(--fg);
   font-family:"Noto Sans TC","PingFang TC","Microsoft JhengHei",system-ui,-apple-system,sans-serif;
   -webkit-text-size-adjust:100%}
-body{padding-bottom:env(safe-area-inset-bottom)}
+body{padding-bottom:env(safe-area-inset-bottom);overflow-x:hidden}
+/* 手機防溢出：flex 子項預設 min-width:auto，長字串會把整頁撐寬並裁掉圖右側 */
+.brandrow>*{min-width:0}
+.brand{flex:1;min-width:0;overflow-wrap:anywhere}
+.machine>*{min-width:0}
+.main,.wrap,section.panel{max-width:100%;overflow-x:hidden}
 button,select,input{font-family:inherit}
 .wrap{max-width:1280px;margin:0 auto;padding:10px}
 
@@ -105,7 +110,7 @@ input[type=range].tail{flex:1;min-width:110px;accent-color:var(--accent)}
 .main{display:grid;grid-template-columns:1fr;gap:10px}
 /* 修正4：允許單指垂直捲動穿透圖表 */
 #chart{background:var(--panel);border:1px solid var(--line);border-radius:12px;
-  height:min(72vh,620px);min-height:380px;touch-action:pan-y}
+  height:min(72vh,620px);min-height:380px;touch-action:pan-y;width:100%;max-width:100%;overflow:hidden}
 #chart .nsewdrag,#chart .drag{touch-action:pan-y !important}
 .refused{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:8px 12px;margin-top:8px;
   color:var(--dim);font-size:11.5px}
@@ -295,23 +300,94 @@ function quadAnnos(){
     q(AX_MAX-.15,AX_MIN+.3,'WEAKENING 弱化',11,'#d8c27a',.85,'right','bottom'),
   ];
 }
+/* ── 水滴尾巴幾何 ───────────────────────────
+   以尾巴路徑為中軸，沿法線擴寬成連續漸縮實體：頭部最寬、尾端趨近 0，
+   並把實體切成 SEG 段、每段自己的 alpha，做出「頭濃尾淡」的漸層。
+   法線在【像素空間】計算，所以視覺寬度不會因 x/y 軸像素比不同而歪掉。      */
+const SEG=12, DENSE=14, HEAD_W_PX=6.4, OVERLAP=1;
+/** 向心(centripetal, alpha=0.5) Catmull-Rom：不會像均勻參數化那樣在轉折處過衝或打結 */
+function catmull(P0,P1,P2,P3,t){
+  const al=0.5;
+  const tj=(ti,a,b)=>ti+Math.pow(Math.hypot(b[0]-a[0],b[1]-a[1])||1e-9,al);
+  const t0=0,t1=tj(t0,P0,P1),t2=tj(t1,P1,P2),t3=tj(t2,P2,P3);
+  const tt=t1+(t2-t1)*t;
+  const lerp=(A,B,ta,tb)=>{const d=(tb-ta)||1e-9,w=(tb-tt)/d,v=(tt-ta)/d;
+    return [A[0]*w+B[0]*v, A[1]*w+B[1]*v];};
+  const A1=lerp(P0,P1,t0,t1),A2=lerp(P1,P2,t1,t2),A3=lerp(P2,P3,t2,t3);
+  const B1=lerp(A1,A2,t0,t2),B2=lerp(A2,A3,t1,t3);
+  return lerp(B1,B2,t1,t2);
+}
+function densify(pts,k){
+  const q=[];                                   // 去除重合點：零長度切線會產生尖刺
+  for(const p of pts) if(!q.length||Math.hypot(p[0]-q[q.length-1][0],p[1]-q[q.length-1][1])>1e-9) q.push(p);
+  if(q.length<2) return q.slice();
+  const e=[q[0],...q,q[q.length-1]], out=[];
+  for(let i=1;i<e.length-2;i++)
+    for(let j=0;j<k;j++) out.push(catmull(e[i-1],e[i],e[i+1],e[i+2],j/k));
+  out.push(q[q.length-1]);
+  return out;
+}
+function rgba(hex,a){
+  const h=hex.replace('#','');
+  const r=parseInt(h.slice(0,2),16),g=parseInt(h.slice(2,4),16),b=parseInt(h.slice(4,6),16);
+  return `rgba(${r},${g},${b},${a})`;
+}
+/** 回傳這條水滴的填充多邊形 traces（不含頭點與 hover） */
+function teardrop(pts,col,pxPerX,pxPerY){
+  const D=densify(pts,DENSE), M=D.length;
+  if(M<2) return [];
+  const L=[],R=[];
+  for(let i=0;i<M;i++){
+    const a=D[Math.max(0,i-1)], b=D[Math.min(M-1,i+1)];
+    let tx=(b[0]-a[0])*pxPerX, ty=(b[1]-a[1])*pxPerY;
+    const len=Math.hypot(tx,ty)||1; tx/=len; ty/=len;
+    const u=i/(M-1);                       // 0=尾端 1=頭部
+    const wpx=HEAD_W_PX*Math.pow(u,1.05);  // 尾端趨近 0，頭部最寬
+    const nx=-ty*wpx/pxPerX, ny=tx*wpx/pxPerY;
+    L.push([D[i][0]+nx, D[i][1]+ny]); R.push([D[i][0]-nx, D[i][1]-ny]);
+  }
+  const out=[];
+  for(let s=0;s<SEG;s++){
+    const a=Math.max(0,Math.floor(s*(M-1)/SEG)-(s?OVERLAP:0)), b=Math.floor((s+1)*(M-1)/SEG);
+    if(b<=a) continue;
+    const xs=[],ys=[];
+    for(let i=a;i<=b;i++){xs.push(L[i][0]);ys.push(L[i][1]);}
+    for(let i=b;i>=a;i--){xs.push(R[i][0]);ys.push(R[i][1]);}
+    xs.push(L[a][0]); ys.push(L[a][1]);
+    const u=(s+0.5)/SEG;
+    out.push({x:xs,y:ys,type:'scatter',mode:'lines',fill:'toself',
+      fillcolor:rgba(col,0.10+0.62*Math.pow(u,1.2)),
+      line:{width:0,color:'rgba(0,0,0,0)'},hoverinfo:'skip',showlegend:false});
+  }
+  return out;
+}
+
 function render(){
   const c=combosOf()[key()], ns=names(), i=state.idx, traces=[], heads=[];
+  const el=$('chart');
+  const pxPerX=Math.max(1,(el.clientWidth||900)-62)/(AX_MAX-AX_MIN);
+  const pxPerY=Math.max(1,(el.clientHeight||520)-56)/(AX_MAX-AX_MIN);
+  // 尺寸於下方 layout 明確指定
   ns.forEach(n=>{
     const s=c[n], col=colorOf[state.group][n];
-    const xs=[],ys=[],sizes=[],txt=[]; const from=Math.max(0,i-state.tail+1);
+    const pts=[],txt=[]; const from=Math.max(0,i-state.tail+1);
     for(let j=from;j<=i;j++){
       if(s.rs_ratio[j]==null||s.rs_momentum[j]==null) continue;
-      xs.push(s.rs_ratio[j]); ys.push(s.rs_momentum[j]); txt.push(H.dates[j]);
+      pts.push([s.rs_ratio[j],s.rs_momentum[j]]); txt.push(H.dates[j]);
     }
-    if(!xs.length) return;
-    const N=xs.length;
-    for(let j=0;j<N;j++) sizes.push(4+10*(j/Math.max(1,N-1)));
-    traces.push({x:xs,y:ys,customdata:txt,name:n,mode:'lines+markers',type:'scatter',
-      line:{color:col,width:1.9,shape:'spline',smoothing:1.05},
-      marker:{color:col,size:sizes,line:{width:0}},
+    if(!pts.length) return;
+    const N=pts.length;
+    // 1) 水滴實體（歷史中間點不再畫獨立圓點）
+    if(N>1) traces.push(...teardrop(pts,col,pxPerX,pxPerY));
+    // 2) 沿中軸鋪不可見 hover 點：各日數值仍讀得到
+    traces.push({x:pts.map(p=>p[0]),y:pts.map(p=>p[1]),customdata:txt,name:n,
+      type:'scatter',mode:'markers',marker:{size:16,color:col,opacity:0},
+      hoverlabel:{bgcolor:'#131a22'},showlegend:false,
       hovertemplate:'<b>'+n+'</b><br>%{customdata}<br>RS-Ratio %{x:.2f}　動能 %{y:.2f}<extra></extra>'});
-    heads.push({n,x:xs[N-1],y:ys[N-1],col});
+    // 3) 頭部實心圓點
+    traces.push({x:[pts[N-1][0]],y:[pts[N-1][1]],name:n,type:'scatter',mode:'markers',
+      marker:{size:9,color:col,line:{width:0}},hoverinfo:'skip',showlegend:false});
+    heads.push({n,x:pts[N-1][0],y:pts[N-1][1],col});
   });
   const h=($('chart').clientHeight||520)-70;
   const gap=(AX_MAX-AX_MIN)*16/Math.max(120,h);
@@ -321,7 +397,11 @@ function render(){
   const labels=heads.map(hd=>({x:hd.x,y:hd.ly,xref:'x',yref:'y',text:hd.n,showarrow:false,
     font:{size:11,color:hd.col},xanchor:'left',xshift:9,bgcolor:'rgba(13,17,23,.62)',borderpad:2}));
 
+  // 明確指定像素尺寸：responsive:true 只在 window resize 事件時重算，
+  // 手機初次載入（無 resize 事件）會沿用錯誤寬度，導致右側象限被裁掉。
+  const cw=Math.max(200,el.clientWidth||900), chh=Math.max(200,el.clientHeight||520);
   const layout={
+    width:cw, height:chh,
     paper_bgcolor:'rgba(0,0,0,0)',plot_bgcolor:'#0b1017',
     margin:{l:46,r:16,t:12,b:44},showlegend:false,
     dragmode:isTouch?false:'zoom',             // 修正4：手機停用拖曳手勢，讓垂直捲動穿透
@@ -336,7 +416,22 @@ function render(){
     {displayModeBar:false,responsive:true,scrollZoom:false,doubleClick:false,
      staticPlot:false,showTips:false});
   const gd=$('chart');
-  if(!gd._clickBound){ gd.on('plotly_click',ev=>{const n=ev.points?.[0]?.data?.name;if(n)openSide(n);}); gd._clickBound=true; }
+  if(!gd._clickBound){
+    gd.on('plotly_click',ev=>{const n=ev.points?.[0]?.data?.name;if(n)openSide(n);});
+    // 容器尺寸變動（手機初次版面落定、轉向、控制列展開）→ 強制重算繪圖區，
+    // 否則 Plotly 會沿用初次量到的寬度，在手機上把右側象限標籤裁掉。
+    if(window.ResizeObserver){
+      let rt=null, lastW=0, lastH=0;
+      new ResizeObserver(es=>{
+        const {width:w,height:h}=es[0].contentRect;
+        if(Math.abs(w-lastW)<2&&Math.abs(h-lastH)<2) return;
+        lastW=w; lastH=h;
+        clearTimeout(rt); rt=setTimeout(()=>{ Plotly.Plots.resize(gd); render(); },120);
+      }).observe(gd);
+    }
+    window.addEventListener('orientationchange',()=>setTimeout(()=>{Plotly.Plots.resize(gd);render();},250));
+    gd._clickBound=true;
+  }
 
   const rf=allNames().filter(n=>!plottableNames().includes(n));
   if(rf.length){
