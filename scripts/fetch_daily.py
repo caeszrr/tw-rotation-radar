@@ -122,6 +122,20 @@ def finmind_fill(codes, day, px):
     return got
 
 
+def expected_universe():
+    """
+    預期宇宙 = sectors.json 全部成分股 + 規模分頁 ETF + 兩條報酬指數。
+    **不可**用 prices.csv 內現有代號當分母 —— 檔案若被截斷，分母會跟著縮小，
+    覆蓋率反而算出 100%+ 而放行（2026-08-13 演練實際踩到）。
+    """
+    with open(os.path.join(ROOT, "data", "sectors.json"), encoding="utf-8") as f:
+        sec = json.load(f)
+    u = {c for v in sec["sectors"].values() for c in v}
+    u |= {"0050", "0051", "006201", "0056", "00713", "00692"}
+    u |= {"TAIEX_TR", "TPEX_TR"}
+    return u
+
+
 def read_prices():
     rows, codes = [], set()
     with open(PRICES, encoding="utf-8", newline="") as f:
@@ -133,7 +147,16 @@ def read_prices():
 
 def main():
     log("L1-start", "每日增量開始")
-    rows, tracked = read_prices()
+    rows, present = read_prices()
+    tracked = expected_universe()
+    # L3-a：先驗「歷史檔本身」是否完整——截斷的 prices.csv 必須當場擋下
+    miss_hist = sorted(tracked - present)
+    if len(present & tracked) < MIN_COVERAGE * len(tracked):
+        log("L3-GATE-FAIL", f"prices.csv 歷史不完整：預期 {len(tracked)} 檔，實際只有 "
+                            f"{len(present & tracked)} 檔（缺 {len(miss_hist)}）→ 不發布")
+        sys.exit(5)
+    if miss_hist:
+        log("L3-gate", f"（可接受）歷史檔缺 {len(miss_hist)} 檔：{miss_hist[:10]}")
     have = defaultdict(set)
     for r in rows:
         have[r["code"]].add(r["date"])

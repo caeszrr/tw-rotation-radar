@@ -1,15 +1,14 @@
 name: daily
 
 # 排程用 UTC。台北 = UTC+8。
-#   17:50 台北 = 09:50 UTC  → 主跑（FinMind TaiwanStockPrice 17:30 更新後才跑）
-#   19:30 台北 = 11:30 UTC  → 補跑（先查當日是否已成功，成功即退出，冪等）
+#   17:50 台北 = 09:50 UTC  → 主跑
+#   19:30 台北 = 11:30 UTC  → 補跑（先查當日是否已完成，完成即退出——冪等）
 on:
   schedule:
     - cron: '50 9 * * 1-5'
     - cron: '30 11 * * 1-5'
   workflow_dispatch:
 
-# 同日兩次觸發不並跑
 concurrency:
   group: daily-${{ github.ref }}
   cancel-in-progress: false
@@ -17,57 +16,79 @@ concurrency:
 permissions:
   contents: write
 
+env:
+  TELEGRAM_BOT_TOKEN:   ${{ secrets.TELEGRAM_BOT_TOKEN }}
+  TELEGRAM_CHAT_ID:     ${{ secrets.TELEGRAM_CHAT_ID }}
+  HC_PING_URL_DAILY:    ${{ secrets.HC_PING_URL_DAILY }}
+  FINMIND_TOKEN:        ${{ secrets.FINMIND_TOKEN }}
+
 jobs:
   build:
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 25
     steps:
       - uses: actions/checkout@v4
-
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
-
       - name: 安裝相依
         run: pip install --quiet pandas numpy
 
-      - name: 判斷今日是否已成功（L6 補跑冪等）
+      - name: run_id 與現況（L0 冪等基準）
         id: guard
         run: |
           RUN_ID=$(TZ=Asia/Taipei date +%F)
           echo "run_id=$RUN_ID" >> "$GITHUB_OUTPUT"
-          LAST=$(python - <<'PY'
-          import csv
-          d=''
-          with open('data/prices.csv',encoding='utf-8') as f:
-              for r in csv.DictReader(f):
-                  if r['date']>d: d=r['date']
-          print(d)
-          PY
-          )
-          echo "last_date=$LAST" >> "$GITHUB_OUTPUT"
-          echo "資料庫最新日期 = $LAST，今日(台北) = $RUN_ID"
+          echo "今日(台北) = $RUN_ID"
+
+      - name: L7 休市日曆檢查（TWSE 官方）
+        id: cal
+        run: python scripts/holidays.py
 
       - name: 單元測試（公式凍結護欄）
         run: python scripts/test_twrrg.py
+      - name: 單元測試失敗 → 告警
+        if: failure()
+        run: python scripts/notify.py fail "${{ steps.guard.outputs.run_id }}" "單元測試" "公式護欄測試未通過"
 
       - name: 每日增量 + 完整性閘門
         id: fetch
         run: python scripts/fetch_daily.py
 
+      - name: 閘門/抓取失敗 → 告警（保留上一版成功的 docs/）
+        if: failure() && steps.fetch.outcome == 'failure'
+        run: |
+          git checkout -- docs/ data/ || true
+          python scripts/notify.py fail "${{ steps.guard.outputs.run_id }}" "每日增量/完整性閘門" \
+            "不發布，已保留上一版成功的 docs/。詳見 Actions 日誌。"
+
       - name: 重算 history.json
         run: python scripts/build_history.py
 
-      - name: 發布（僅在有變更時 commit）
+      - name: 發布（僅在【資料】真的變動時 commit）
+        id: publish
         run: |
           git config user.name  "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add data/prices.csv docs/history.json
-          if git diff --cached --quiet; then
-            echo "無變更（非交易日或今日已完成），不 commit。"
+          # history.json 內含 generated_at，每次重算都會變；只看它會導致每跑必 commit。
+          # 以 data/prices.csv（真資料）為唯一判準。
+          if git diff --quiet -- data/prices.csv; then
+            echo "prices.csv 無變動（非交易日／今日已完成）→ 不發布。"
+            git checkout -- docs/history.json || true
+            echo "published=false" >> "$GITHUB_OUTPUT"
           else
+            git add data/prices.csv docs/history.json
             git commit -m "daily: ${{ steps.guard.outputs.run_id }} 收盤定稿"
             git push
+            echo "published=true" >> "$GITHUB_OUTPUT"
           fi
 
-      # 心跳與雙重告警（L4/L5）在 Phase 5 接上 Healthchecks.io + Telegram
+      - name: L4 成功心跳（最後一步；沒有 ping 就是事故）
+        if: success()
+        run: python scripts/notify.py ping daily
+
+      - name: 任一步驟失敗 → 心跳報失敗 + Telegram
+        if: failure()
+        run: |
+          python scripts/notify.py ping daily /fail
+          python scripts/notify.py fail "${{ steps.guard.outputs.run_id }}" "workflow" "見 Actions 日誌"
