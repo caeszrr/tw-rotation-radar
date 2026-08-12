@@ -1,0 +1,73 @@
+name: daily
+
+# 排程用 UTC。台北 = UTC+8。
+#   17:50 台北 = 09:50 UTC  → 主跑（FinMind TaiwanStockPrice 17:30 更新後才跑）
+#   19:30 台北 = 11:30 UTC  → 補跑（先查當日是否已成功，成功即退出，冪等）
+on:
+  schedule:
+    - cron: '50 9 * * 1-5'
+    - cron: '30 11 * * 1-5'
+  workflow_dispatch:
+
+# 同日兩次觸發不並跑
+concurrency:
+  group: daily-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: 安裝相依
+        run: pip install --quiet pandas numpy
+
+      - name: 判斷今日是否已成功（L6 補跑冪等）
+        id: guard
+        run: |
+          RUN_ID=$(TZ=Asia/Taipei date +%F)
+          echo "run_id=$RUN_ID" >> "$GITHUB_OUTPUT"
+          LAST=$(python - <<'PY'
+          import csv
+          d=''
+          with open('data/prices.csv',encoding='utf-8') as f:
+              for r in csv.DictReader(f):
+                  if r['date']>d: d=r['date']
+          print(d)
+          PY
+          )
+          echo "last_date=$LAST" >> "$GITHUB_OUTPUT"
+          echo "資料庫最新日期 = $LAST，今日(台北) = $RUN_ID"
+
+      - name: 單元測試（公式凍結護欄）
+        run: python scripts/test_twrrg.py
+
+      - name: 每日增量 + 完整性閘門
+        id: fetch
+        run: python scripts/fetch_daily.py
+
+      - name: 重算 history.json
+        run: python scripts/build_history.py
+
+      - name: 發布（僅在有變更時 commit）
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add data/prices.csv docs/history.json
+          if git diff --cached --quiet; then
+            echo "無變更（非交易日或今日已完成），不 commit。"
+          else
+            git commit -m "daily: ${{ steps.guard.outputs.run_id }} 收盤定稿"
+            git push
+          fi
+
+      # 心跳與雙重告警（L4/L5）在 Phase 5 接上 Healthchecks.io + Telegram

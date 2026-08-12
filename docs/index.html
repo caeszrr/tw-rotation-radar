@@ -1,0 +1,548 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>台股輪動雷達</title>
+<style>
+:root{
+  --bg:#0d1117; --panel:#131a22; --panel2:#0f151c; --line:#243040;
+  --fg:#e6edf3; --dim:#8b98a5; --dim2:#5c6b7a;
+  --q-leading:rgba(126,42,48,.34);    /* 領先 暗紅 */
+  --q-improving:rgba(28,102,102,.32); /* 改善 暗青 */
+  --q-lagging:rgba(36,62,122,.32);    /* 落後 暗藍 */
+  --q-weakening:rgba(122,101,34,.30); /* 弱化 暗黃 */
+  --accent:#4c8dff;
+}
+*{box-sizing:border-box}
+html,body{margin:0;padding:0;background:var(--bg);color:var(--fg);
+  font-family:"Noto Sans TC","PingFang TC","Microsoft JhengHei",system-ui,-apple-system,sans-serif;
+  -webkit-text-size-adjust:100%}
+body{padding-bottom:env(safe-area-inset-bottom)}
+button,select,input{font-family:inherit}
+.wrap{max-width:1280px;margin:0 auto;padding:10px}
+
+/* ── 日期機 ─────────────────────────────── */
+header{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:10px 12px;margin-bottom:10px}
+.brandrow{display:flex;align-items:center;justify-content:space-between;gap:8px;margin-bottom:8px}
+.brand{font-size:15px;font-weight:700;letter-spacing:.04em}
+.brand small{color:var(--dim);font-weight:400;margin-left:6px;font-size:11px}
+.machine{display:flex;align-items:center;justify-content:center;gap:10px;flex-wrap:wrap}
+.bigdate{font-size:28px;font-weight:800;letter-spacing:.06em;font-variant-numeric:tabular-nums;min-width:200px;text-align:center}
+.bigdate .wd{font-size:13px;color:var(--dim);margin-left:6px;font-weight:500}
+.mbtn{background:var(--panel2);color:var(--fg);border:1px solid var(--line);border-radius:8px;
+  min-width:42px;height:38px;font-size:15px;cursor:pointer}
+.mbtn:active{background:#1b2531}
+.mbtn:disabled{opacity:.32;cursor:not-allowed}
+.mbtn.on{background:var(--accent);border-color:var(--accent);color:#fff}
+
+/* 修正1：自訂填充滑桿（不依賴瀏覽器 accent-color，確保填充與圓點必動） */
+#dateSlider{-webkit-appearance:none;appearance:none;width:100%;height:22px;margin:12px 0 0;
+  background:transparent;cursor:pointer;display:block;touch-action:pan-x}
+#dateSlider::-webkit-slider-runnable-track{height:6px;border-radius:99px;
+  background:linear-gradient(90deg,var(--accent) 0%,var(--accent) var(--pct,0%),#1d2836 var(--pct,0%),#1d2836 100%)}
+#dateSlider::-moz-range-track{height:6px;border-radius:99px;background:#1d2836}
+#dateSlider::-moz-range-progress{height:6px;border-radius:99px;background:var(--accent)}
+#dateSlider::-webkit-slider-thumb{-webkit-appearance:none;width:20px;height:20px;border-radius:50%;
+  background:#fff;border:3px solid var(--accent);margin-top:-7px;box-shadow:0 1px 6px rgba(0,0,0,.6)}
+#dateSlider::-moz-range-thumb{width:20px;height:20px;border-radius:50%;background:#fff;
+  border:3px solid var(--accent);box-shadow:0 1px 6px rgba(0,0,0,.6)}
+.rangelab{display:flex;justify-content:space-between;color:var(--dim2);font-size:11px;margin-top:2px;font-variant-numeric:tabular-nums}
+.livechip{font-size:11px;color:var(--dim);border:1px dashed var(--line);border-radius:99px;padding:2px 8px}
+
+/* ── 日曆 ───────────────────────────────── */
+.calwrap{position:relative}
+.cal{position:absolute;z-index:50;top:8px;left:50%;transform:translateX(-50%);
+  background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:10px;
+  box-shadow:0 12px 40px rgba(0,0,0,.6);width:300px}
+.cal.hidden{display:none}
+.calhead{display:flex;align-items:center;justify-content:space-between;gap:4px;margin-bottom:8px}
+.calhead .ttl{flex:1;text-align:center;font-size:14px;font-variant-numeric:tabular-nums;
+  background:var(--panel2);border:1px solid var(--line);border-radius:8px;height:38px;color:var(--fg);cursor:pointer}
+.calhead .ttl:active{background:#1b2531}
+.calgrid{display:grid;grid-template-columns:repeat(7,1fr);gap:3px}
+.calgrid div{text-align:center;padding:7px 0;border-radius:7px;font-size:12px;font-variant-numeric:tabular-nums}
+.calgrid .dow{color:var(--dim2);font-size:10px;padding:2px 0}
+.calgrid .day{cursor:pointer;background:var(--panel2);border:1px solid transparent}
+.calgrid .day:active{background:#1b2531}
+.calgrid .off{color:#39434f;background:transparent;cursor:not-allowed}
+.calgrid .sel{background:var(--accent);color:#fff;font-weight:700}
+.ygrid{display:grid;grid-template-columns:repeat(3,1fr);gap:6px}
+.ygrid button,.mgrid button{background:var(--panel2);color:var(--fg);border:1px solid var(--line);
+  border-radius:8px;padding:11px 0;font-size:13px;cursor:pointer;font-variant-numeric:tabular-nums}
+.ygrid button.on,.mgrid button.on{background:var(--accent);border-color:var(--accent);color:#fff;font-weight:700}
+.mgrid{display:grid;grid-template-columns:repeat(4,1fr);gap:6px}
+.calnote{color:var(--dim2);font-size:10px;margin-top:8px;text-align:center}
+
+/* ── 控制列 ─────────────────────────────── */
+.controls{background:var(--panel);border:1px solid var(--line);border-radius:12px;margin-bottom:10px}
+.ctoggle{display:none}
+.crow{display:flex;align-items:center;gap:8px;padding:8px 12px;border-bottom:1px solid var(--line);flex-wrap:wrap}
+.crow:last-child{border-bottom:none}
+.clab{color:var(--dim);font-size:11px;min-width:56px}
+.seg{display:flex;gap:4px;flex-wrap:wrap}
+.seg button{background:var(--panel2);color:var(--dim);border:1px solid var(--line);
+  border-radius:7px;padding:6px 11px;font-size:12px;cursor:pointer;white-space:nowrap}
+.seg button.on{background:var(--accent);border-color:var(--accent);color:#fff;font-weight:600}
+input[type=range].tail{flex:1;min-width:110px;accent-color:var(--accent)}
+.tailval{color:var(--fg);font-size:12px;min-width:52px;font-variant-numeric:tabular-nums}
+
+/* 修正3：族群顯示 chips */
+.chipbar{display:flex;gap:6px;overflow-x:auto;padding:2px 0 4px;flex:1;
+  scrollbar-width:thin;-webkit-overflow-scrolling:touch}
+.chip{display:inline-flex;align-items:center;gap:6px;white-space:nowrap;flex:0 0 auto;
+  background:var(--panel2);color:var(--dim);border:1px solid var(--line);border-radius:99px;
+  padding:6px 11px;font-size:12px;cursor:pointer;opacity:.5}
+.chip.on{opacity:1;color:var(--fg);border-color:#3a4a5e;background:#182231}
+.chip .dot{width:9px;height:9px;border-radius:50%;flex:0 0 auto}
+.chip.dis{opacity:.32;cursor:not-allowed;text-decoration:line-through}
+.chip .anch{font-size:9px;color:var(--dim2)}
+.quick{display:flex;gap:4px;flex:0 0 auto}
+.quick button{background:var(--panel2);color:var(--dim);border:1px solid var(--line);
+  border-radius:7px;padding:6px 9px;font-size:11px;cursor:pointer;white-space:nowrap}
+
+/* ── 圖 ─────────────────────────────────── */
+.main{display:grid;grid-template-columns:1fr;gap:10px}
+/* 修正4：允許單指垂直捲動穿透圖表 */
+#chart{background:var(--panel);border:1px solid var(--line);border-radius:12px;
+  height:min(72vh,620px);min-height:380px;touch-action:pan-y}
+#chart .nsewdrag,#chart .drag{touch-action:pan-y !important}
+.refused{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:8px 12px;margin-top:8px;
+  color:var(--dim);font-size:11.5px}
+.refused b{color:#d8a657}
+
+section.panel{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:12px;margin-top:10px}
+section.panel h2{margin:0 0 8px;font-size:14px;letter-spacing:.04em}
+section.panel h2 span{color:var(--dim);font-weight:400;font-size:11px;margin-left:6px}
+.trans{display:flex;flex-direction:column;gap:6px;max-height:280px;overflow:auto}
+.tr{display:flex;align-items:center;gap:8px;background:var(--panel2);border:1px solid var(--line);
+  border-radius:8px;padding:7px 10px;font-size:12.5px}
+.tr .nm{font-weight:600;min-width:104px}
+.tr .arw{color:var(--dim)}
+.empty{color:var(--dim2);font-size:12px;padding:8px 2px}
+.qtag{padding:2px 7px;border-radius:99px;font-size:11px;border:1px solid var(--line)}
+.q-LEADING{background:var(--q-leading)} .q-IMPROVING{background:var(--q-improving)}
+.q-LAGGING{background:var(--q-lagging)} .q-WEAKENING{background:var(--q-weakening)}
+
+.drawer{position:fixed;inset:0;background:rgba(0,0,0,.55);z-index:80;display:none}
+.drawer.open{display:block}
+.drawer .sheet{position:absolute;right:0;top:0;bottom:0;width:min(420px,88vw);background:var(--panel);
+  border-left:1px solid var(--line);padding:14px;overflow:auto}
+.drawer h3{margin:0 0 4px;font-size:16px}
+.drawer .sub{color:var(--dim);font-size:11.5px;margin-bottom:10px}
+.closeb{position:absolute;top:10px;right:12px;background:none;border:none;color:var(--dim);font-size:22px;cursor:pointer}
+table{width:100%;border-collapse:collapse;font-size:12px}
+th,td{text-align:left;padding:5px 4px;border-bottom:1px solid var(--line);font-variant-numeric:tabular-nums}
+th{color:var(--dim);font-weight:500;font-size:11px}
+.mem{display:flex;flex-wrap:wrap;gap:5px;margin-top:4px}
+.mem span{background:var(--panel2);border:1px solid var(--line);border-radius:6px;padding:3px 7px;font-size:11.5px}
+.mem span i{color:var(--dim2);font-style:normal;margin-right:4px;font-variant-numeric:tabular-nums}
+
+footer{color:var(--dim2);font-size:11px;line-height:1.75;margin:14px 2px 24px;text-align:center}
+footer b{color:var(--dim);font-weight:600}
+.loading{padding:40px;text-align:center;color:var(--dim)}
+
+@media(min-width:900px){ .wrap{padding:14px} #chart{height:min(76vh,680px)} }
+@media(max-width:640px){
+  .bigdate{font-size:24px;min-width:170px}
+  .ctoggle{display:block;width:100%;background:var(--panel2);color:var(--fg);border:none;
+    border-bottom:1px solid var(--line);padding:10px;font-size:12.5px;cursor:pointer;text-align:left;border-radius:12px 12px 0 0}
+  .cbody{display:none} .cbody.open{display:block}
+  .clab{min-width:100%}
+  #chart{height:min(56vh,460px)}
+}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <div class="brandrow">
+      <div class="brand">台股輪動雷達<small id="specNote">TWRRG-v1</small></div>
+      <div class="livechip" id="liveChip">收盤定稿</div>
+    </div>
+    <div class="calwrap">
+      <div class="machine">
+        <button class="mbtn" id="prevDay" title="前一交易日">◀</button>
+        <div class="bigdate" id="bigDate">—<span class="wd"></span></div>
+        <button class="mbtn" id="nextDay" title="後一交易日">▶</button>
+        <button class="mbtn" id="calBtn" title="日曆">📅</button>
+        <button class="mbtn" id="playBtn" title="播放回放">▶</button>
+      </div>
+      <div class="cal hidden" id="calPopup"></div>
+    </div>
+    <input type="range" id="dateSlider" min="0" max="0" value="0" step="1">
+    <div class="rangelab"><span id="rangeA"></span><span id="rangeB"></span></div>
+  </header>
+
+  <div class="controls">
+    <button class="ctoggle" id="ctoggle">⚙️ 顯示設定（點開／收合）</button>
+    <div class="cbody" id="cbody">
+      <div class="crow"><span class="clab">分頁</span><div class="seg" id="segGroup"></div></div>
+      <div class="crow"><span class="clab">視窗</span><div class="seg" id="segWindow"></div></div>
+      <div class="crow"><span class="clab">權重</span><div class="seg" id="segWeight"></div></div>
+      <div class="crow"><span class="clab">基準</span><div class="seg" id="segBench"></div></div>
+      <div class="crow"><span class="clab">尾巴</span>
+        <input type="range" class="tail" id="tailRange" min="3" max="20" value="5">
+        <span class="tailval" id="tailVal">5 點</span>
+      </div>
+      <div class="crow"><span class="clab">族群顯示</span>
+        <div class="quick"><button id="selAll">全選</button><button id="selNone">全不選</button></div>
+        <div class="chipbar" id="chipBar"></div>
+      </div>
+    </div>
+  </div>
+
+  <div class="main"><div id="chart"><div class="loading">載入中…</div></div></div>
+  <div class="refused" id="refused" style="display:none"></div>
+
+  <section class="panel">
+    <h2 id="transTitle">今日象限變化<span>只列事實，不含任何買賣建議</span></h2>
+    <div class="trans" id="transList"></div>
+  </section>
+
+  <footer>
+    <b>台股智能助手 · 台股輪動雷達</b><br>
+    資料來源：臺灣證券交易所／證券櫃檯買賣中心公開資料，經 FinMind 取得；
+    基準為發行量加權股價<b>報酬</b>指數與櫃買報酬指數。<br>
+    <b>本頁僅呈現市場公開資料之計算結果，非投資建議。</b><br>
+    已知近似：還原價僅處理<b>現金股利</b>，股票股利與減資未還原；
+    市值權重採當期發行股數快照，歷史增減資未還原。<br>
+    <span id="footMeta"></span>
+  </footer>
+</div>
+
+<div class="drawer" id="drawer"><div class="sheet" id="sheet"></div></div>
+
+<script src="plotly.min.js"></script>
+<script>
+const QLAB={LEADING:'領先',IMPROVING:'改善',LAGGING:'落後',WEAKENING:'弱化'};
+const PALETTE=['#ff6b6b','#ffd166','#06d6a0','#4cc9f0','#b388ff','#f78c6b','#8ac926',
+  '#ff8fab','#00bbf9','#c9ada7','#e0aaff','#7bdff2','#ffb703','#9bf6ff'];
+const AX_MIN=94, AX_MAX=106;
+const isTouch = window.matchMedia && window.matchMedia('(pointer: coarse)').matches;
+
+let H=null, anchors=[], playTimer=null, calView='day', calMonth=null, tradingSet=null;
+let vis={industry:null,size:null};          // 族群顯示狀態
+let colorOf={industry:{},size:{}};          // 穩定配色（不隨隱藏而位移）
+let state={group:'industry',win:60,weight:'equal',bench:'taiex',tail:5,idx:0,winStart:null};
+
+const $=id=>document.getElementById(id);
+const combosOf=()=>state.group==='industry'?H.combos:H.size_combos;
+const metaOf=()=>state.group==='industry'?H.sectors:H.size_items;
+const transOf=()=>state.group==='industry'?H.transitions:H.size_transitions;
+const key=()=>state.weight+'|'+state.bench;
+const allNames=()=>Object.keys(metaOf());
+const plottableNames=()=>{const c=combosOf()[key()];return allNames().filter(n=>c[n]&&!c[n].insufficient_history);};
+const names=()=>plottableNames().filter(n=>vis[state.group][n]);
+
+/* ── 顯示狀態（localStorage） ───────────── */
+const LSKEY=g=>'radar.vis.'+g;
+function loadVis(g){
+  const all=Object.keys(g==='industry'?H.sectors:H.size_items);
+  let saved=null;
+  try{saved=JSON.parse(localStorage.getItem(LSKEY(g))||'null');}catch(e){}
+  const o={}; all.forEach(n=>o[n]= saved && (n in saved) ? !!saved[n] : true);
+  return o;
+}
+function saveVis(){ try{localStorage.setItem(LSKEY(state.group),JSON.stringify(vis[state.group]));}catch(e){} }
+
+/* ── 範圍：視窗錨點與游標【解耦】 ────────── */
+function plottableRange(){
+  const c=combosOf()[key()], ns=plottableNames(); let lo=null,hi=null;
+  for(const n of ns){const s=c[n];
+    for(let i=0;i<H.dates.length;i++){if(s.rs_ratio[i]!=null&&s.rs_momentum[i]!=null){if(lo===null||i<lo)lo=i;break;}}
+    for(let i=H.dates.length-1;i>=0;i--){if(s.rs_ratio[i]!=null&&s.rs_momentum[i]!=null){if(hi===null||i>hi)hi=i;break;}}}
+  return [lo??0,hi??H.dates.length-1];
+}
+/** 視窗只在「換視窗長度／跳到窗外日期／換分頁」時移動，拖曳滑桿時固定不動 */
+function winRange(){
+  const [lo,hi]=plottableRange();
+  const span=Math.min(state.win,hi-lo+1);
+  let ws=state.winStart;
+  if(ws==null) ws=hi-span+1;
+  ws=Math.max(lo,Math.min(ws,hi-span+1));
+  let we=Math.min(hi,ws+span-1);
+  if(state.idx<ws||state.idx>we){                 // 游標跑出視窗才重新錨定
+    ws=Math.max(lo,Math.min(state.idx-Math.floor(span/2),hi-span+1));
+    we=Math.min(hi,ws+span-1);
+    if(state.idx<ws){ws=Math.max(lo,state.idx);we=Math.min(hi,ws+span-1);}
+    if(state.idx>we){we=Math.min(hi,state.idx);ws=Math.max(lo,we-span+1);}
+  }
+  state.winStart=ws;
+  return [ws,we,lo,hi];
+}
+
+/* ── 圖 ─────────────────────────────────── */
+function quadShapes(){
+  const css=n=>getComputedStyle(document.documentElement).getPropertyValue(n).trim();
+  const s=(x0,x1,y0,y1,c)=>({type:'rect',xref:'x',yref:'y',x0,x1,y0,y1,fillcolor:c,line:{width:0},layer:'below'});
+  return [
+    s(100,AX_MAX,100,AX_MAX,css('--q-leading')), s(AX_MIN,100,100,AX_MAX,css('--q-improving')),
+    s(AX_MIN,100,AX_MIN,100,css('--q-lagging')), s(100,AX_MAX,AX_MIN,100,css('--q-weakening')),
+    {type:'line',x0:100,x1:100,y0:AX_MIN,y1:AX_MAX,line:{color:'#3b4a5c',width:1,dash:'dash'},layer:'below'},
+    {type:'line',x0:AX_MIN,x1:AX_MAX,y0:100,y1:100,line:{color:'#3b4a5c',width:1,dash:'dash'},layer:'below'},
+  ];
+}
+function quadAnnos(){
+  const q=(x,y,t,sz,col,op,xa,ya)=>({x,y,xref:'x',yref:'y',text:t,showarrow:false,
+    font:{size:sz,color:col},opacity:op,xanchor:xa,yanchor:ya});
+  const a=(AX_MIN+100)/2, b=(100+AX_MAX)/2;
+  return [
+    q(b,b,'1',86,'#fff',.055),q(a,b,'2',86,'#fff',.055),q(a,a,'3',86,'#fff',.055),q(b,a,'4',86,'#fff',.055),
+    q(AX_MAX-.15,AX_MAX-.3,'LEADING 領先',11,'#e08b8b',.85,'right','top'),
+    q(AX_MIN+.15,AX_MAX-.3,'IMPROVING 改善',11,'#77c9c9',.85,'left','top'),
+    q(AX_MIN+.15,AX_MIN+.3,'LAGGING 落後',11,'#8fa6d8',.85,'left','bottom'),
+    q(AX_MAX-.15,AX_MIN+.3,'WEAKENING 弱化',11,'#d8c27a',.85,'right','bottom'),
+  ];
+}
+function render(){
+  const c=combosOf()[key()], ns=names(), i=state.idx, traces=[], heads=[];
+  ns.forEach(n=>{
+    const s=c[n], col=colorOf[state.group][n];
+    const xs=[],ys=[],sizes=[],txt=[]; const from=Math.max(0,i-state.tail+1);
+    for(let j=from;j<=i;j++){
+      if(s.rs_ratio[j]==null||s.rs_momentum[j]==null) continue;
+      xs.push(s.rs_ratio[j]); ys.push(s.rs_momentum[j]); txt.push(H.dates[j]);
+    }
+    if(!xs.length) return;
+    const N=xs.length;
+    for(let j=0;j<N;j++) sizes.push(4+10*(j/Math.max(1,N-1)));
+    traces.push({x:xs,y:ys,customdata:txt,name:n,mode:'lines+markers',type:'scatter',
+      line:{color:col,width:1.9,shape:'spline',smoothing:1.05},
+      marker:{color:col,size:sizes,line:{width:0}},
+      hovertemplate:'<b>'+n+'</b><br>%{customdata}<br>RS-Ratio %{x:.2f}　動能 %{y:.2f}<extra></extra>'});
+    heads.push({n,x:xs[N-1],y:ys[N-1],col});
+  });
+  const h=($('chart').clientHeight||520)-70;
+  const gap=(AX_MAX-AX_MIN)*16/Math.max(120,h);
+  heads.sort((a,b)=>b.y-a.y);
+  let last=Infinity;
+  heads.forEach(hd=>{const ly=Math.min(hd.y,last-gap);hd.ly=ly;last=ly;});
+  const labels=heads.map(hd=>({x:hd.x,y:hd.ly,xref:'x',yref:'y',text:hd.n,showarrow:false,
+    font:{size:11,color:hd.col},xanchor:'left',xshift:9,bgcolor:'rgba(13,17,23,.62)',borderpad:2}));
+
+  const layout={
+    paper_bgcolor:'rgba(0,0,0,0)',plot_bgcolor:'#0b1017',
+    margin:{l:46,r:16,t:12,b:44},showlegend:false,
+    dragmode:isTouch?false:'zoom',             // 修正4：手機停用拖曳手勢，讓垂直捲動穿透
+    xaxis:{range:[AX_MIN,AX_MAX],fixedrange:true,title:{text:'RS-Ratio 相對強弱',font:{size:11,color:'#8b98a5'}},
+      gridcolor:'#18212c',zeroline:false,tickfont:{size:10,color:'#5c6b7a'}},
+    yaxis:{range:[AX_MIN,AX_MAX],fixedrange:true,title:{text:'RS-Momentum 動能',font:{size:11,color:'#8b98a5'}},
+      gridcolor:'#18212c',zeroline:false,tickfont:{size:10,color:'#5c6b7a'}},
+    shapes:quadShapes(),annotations:quadAnnos().concat(labels),
+    hoverlabel:{bgcolor:'#131a22',bordercolor:'#243040',font:{color:'#e6edf3',size:11}},
+  };
+  Plotly.react('chart',traces,layout,
+    {displayModeBar:false,responsive:true,scrollZoom:false,doubleClick:false,
+     staticPlot:false,showTips:false});
+  const gd=$('chart');
+  if(!gd._clickBound){ gd.on('plotly_click',ev=>{const n=ev.points?.[0]?.data?.name;if(n)openSide(n);}); gd._clickBound=true; }
+
+  const rf=allNames().filter(n=>!plottableNames().includes(n));
+  if(rf.length){
+    const m=metaOf(), cb=combosOf()[key()];
+    $('refused').style.display='block';
+    $('refused').innerHTML='⛔ <b>拒繪</b>：'+rf.map(n=>n+'（'+((cb[n]||{}).pending_reason||(m[n]||{}).pending_reason||'歷史不足，未達 60 交易日')+'）').join('；');
+  } else $('refused').style.display='none';
+
+  renderTrans(); syncDate();
+}
+
+/* ── 象限變化 ───────────────────────────── */
+function renderTrans(){
+  const d=H.dates[state.idx];
+  const list=(transOf()[key()]||[]).filter(t=>t.date===d && vis[state.group][t.sector]);
+  $('transTitle').innerHTML=(state.idx===plottableRange()[1]?'今日':d+' ')+'象限變化<span>只列事實，不含任何買賣建議</span>';
+  if(!list.length){$('transList').innerHTML='<div class="empty">這一天沒有任何（已顯示的）族群跨越象限。</div>';return;}
+  $('transList').innerHTML=list.map(t=>{
+    let mark='';
+    if(t.from==='IMPROVING'&&t.to==='LEADING') mark='🟢 資金轉入';
+    else if(t.from==='LEADING'&&t.to==='WEAKENING') mark='🟡 動能翻轉';
+    return `<div class="tr"><span class="nm">${t.sector}</span>
+      <span class="qtag q-${t.from}">${QLAB[t.from]}</span><span class="arw">→</span>
+      <span class="qtag q-${t.to}">${QLAB[t.to]}</span>
+      <span style="color:var(--dim);font-size:11px">${t.date}</span>
+      <span style="margin-left:auto;font-size:11px">${mark}</span></div>`;}).join('');
+}
+
+/* ── 側欄 ───────────────────────────────── */
+function openSide(n){
+  const m=metaOf()[n], c=combosOf()[key()][n], i=state.idx, rows=[];
+  for(let j=Math.max(0,i-4);j<=i;j++){
+    if(c.rs_ratio[j]==null) continue;
+    rows.push(`<tr><td>${H.dates[j]}</td><td>${c.rs_ratio[j].toFixed(2)}</td>
+      <td>${c.rs_momentum[j]==null?'—':c.rs_momentum[j].toFixed(2)}</td>
+      <td>${c.quadrant[j]?QLAB[c.quadrant[j]]:'—'}</td></tr>`);
+  }
+  const mem = state.group==='industry'
+    ? `<div class="sub" style="margin-top:14px">成分股 ${m.members.length} 檔</div><div class="mem">`+
+      m.members.map(cd=>`<span><i>${cd}</i>${(m.member_names||{})[cd]||''}</span>`).join('')+'</div>'
+    : `<div class="sub" style="margin-top:14px">代表標的：${m.code||'—'} ${m.name||''}</div>`;
+  $('sheet').innerHTML=`<button class="closeb" id="closeSide">×</button><h3>${n}</h3>
+    <div class="sub">基準：${H.meta.benchmark_labels[state.bench]}　權重：${state.weight==='equal'?'等權':'市值'}</div>
+    <table><tr><th>日期</th><th>RS-Ratio</th><th>動能</th><th>象限</th></tr>${rows.reverse().join('')}</table>${mem}`;
+  $('drawer').classList.add('open');
+  $('closeSide').onclick=()=>$('drawer').classList.remove('open');
+}
+$('drawer').addEventListener('click',e=>{if(e.target.id==='drawer')$('drawer').classList.remove('open');});
+
+/* ── 日期機（修正1） ────────────────────── */
+function setFill(){
+  const sl=$('dateSlider'), a=+sl.min, b=+sl.max, v=+sl.value;
+  const pct = b>a ? ((v-a)/(b-a))*100 : 0;
+  sl.style.setProperty('--pct', pct.toFixed(2)+'%');
+}
+function setDateLabel(i){
+  const d=H.dates[i];
+  const wd=['日','一','二','三','四','五','六'][new Date(d+'T00:00:00+08:00').getDay()];
+  $('bigDate').innerHTML=d+'<span class="wd">週'+wd+'</span>';
+}
+/** 完整同步（會重設 min/max）—— 只在非拖曳時呼叫 */
+function syncDate(){
+  const [s,e,lo,hi]=winRange();
+  const sl=$('dateSlider');
+  sl.min=s; sl.max=e; sl.value=state.idx;
+  setFill(); setDateLabel(state.idx);
+  $('rangeA').textContent=H.dates[s]; $('rangeB').textContent=H.dates[e];
+  $('prevDay').disabled=state.idx<=lo; $('nextDay').disabled=state.idx>=hi;
+  $('liveChip').textContent = state.idx===hi ? '最新收盤定稿' : '歷史定稿';
+}
+function step(n){const [,,lo,hi]=winRange();state.idx=Math.max(lo,Math.min(hi,state.idx+n));render();}
+$('prevDay').onclick=()=>step(-1);
+$('nextDay').onclick=()=>step(1);
+
+// 拖曳中：只動填充/圓點/日期，不重設 min/max、不重繪圖表
+$('dateSlider').addEventListener('input',e=>{
+  state.idx=+e.target.value; setFill(); setDateLabel(state.idx);
+});
+// 放開才重繪
+$('dateSlider').addEventListener('change',e=>{ state.idx=+e.target.value; render(); });
+
+function stopPlay(){ if(playTimer){clearInterval(playTimer);playTimer=null;}
+  $('playBtn').textContent='▶'; $('playBtn').classList.remove('on'); }
+$('playBtn').onclick=()=>{
+  if(playTimer){ stopPlay(); return; }
+  const [s,e]=winRange();
+  if(state.idx>=e) state.idx=s;                 // 在終點 → 從起點重播
+  $('playBtn').textContent='⏸'; $('playBtn').classList.add('on');
+  const sl=$('dateSlider');
+  playTimer=setInterval(()=>{
+    const [,ee]=winRange();
+    if(state.idx>=ee){ stopPlay(); return; }
+    state.idx++;
+    sl.value=state.idx; setFill(); setDateLabel(state.idx);   // 圓點與填充逐日同步
+    render();
+  },300);
+};
+
+/* ── 日曆（修正2：年/月快速跳） ─────────── */
+function drawCal(){
+  const [,,lo,hi]=winRange(), cur=H.dates[state.idx];
+  if(!calMonth) calMonth=cur.slice(0,7);
+  let [Y,M]=calMonth.split('-').map(Number);
+  const yLo=+H.dates[lo].slice(0,4), yHi=+H.dates[hi].slice(0,4);
+
+  if(calView==='year'){
+    let g='<div class="calhead"><button class="ttl" id="cBack">← 回月曆</button></div><div class="ygrid">';
+    for(let y=yLo;y<=yHi;y++) g+=`<button class="${y===Y?'on':''}" data-y="${y}">${y}</button>`;
+    g+='</div><div class="calnote">選年份 → 再選月份</div>';
+    $('calPopup').innerHTML=g;
+    $('cBack').onclick=e=>{e.stopPropagation();calView='day';drawCal();};
+    $('calPopup').querySelectorAll('[data-y]').forEach(b=>b.onclick=e=>{
+      e.stopPropagation();calMonth=b.dataset.y+'-'+String(M).padStart(2,'0');calView='month';drawCal();});
+    return;
+  }
+  if(calView==='month'){
+    let g=`<div class="calhead"><button class="ttl" id="cBack">${Y} 年 · 選月份</button></div><div class="mgrid">`;
+    for(let m=1;m<=12;m++) g+=`<button class="${m===M?'on':''}" data-m="${m}">${m}月</button>`;
+    g+='</div><div class="calnote">點上方可回年份選擇</div>';
+    $('calPopup').innerHTML=g;
+    $('cBack').onclick=e=>{e.stopPropagation();calView='year';drawCal();};
+    $('calPopup').querySelectorAll('[data-m]').forEach(b=>b.onclick=e=>{
+      e.stopPropagation();calMonth=Y+'-'+String(+b.dataset.m).padStart(2,'0');calView='day';drawCal();});
+    return;
+  }
+  const first=new Date(Y,M-1,1), start=first.getDay(), dim=new Date(Y,M,0).getDate();
+  let g='<div class="calhead">'
+    +'<button class="mbtn" id="cPrevY" title="前一年">◀◀</button>'
+    +'<button class="mbtn" id="cPrev" title="前一月">◀</button>'
+    +`<button class="ttl" id="cTitle">${Y} 年 ${M} 月 ▾</button>`
+    +'<button class="mbtn" id="cNext" title="後一月">▶</button>'
+    +'<button class="mbtn" id="cNextY" title="後一年">▶▶</button></div><div class="calgrid">'
+    +['日','一','二','三','四','五','六'].map(d=>`<div class="dow">${d}</div>`).join('');
+  for(let k=0;k<start;k++) g+='<div></div>';
+  for(let d=1;d<=dim;d++){
+    const ds=`${Y}-${String(M).padStart(2,'0')}-${String(d).padStart(2,'0')}`;
+    const j=tradingSet.get(ds), ok=j!==undefined&&j>=lo&&j<=hi;
+    g+= ok?`<div class="day${ds===cur?' sel':''}" data-i="${j}">${d}</div>`:`<div class="off">${d}</div>`;
+  }
+  g+='</div><div class="calnote">灰色＝非交易日或超出可繪範圍，不可選　·　點標題可快速跳年</div>';
+  $('calPopup').innerHTML=g;
+  const shift=(n)=>{let[y,m]=calMonth.split('-').map(Number);m+=n;
+    while(m<1){m+=12;y--} while(m>12){m-=12;y++} calMonth=y+'-'+String(m).padStart(2,'0');drawCal();};
+  $('cPrev').onclick=e=>{e.stopPropagation();shift(-1);};
+  $('cNext').onclick=e=>{e.stopPropagation();shift(1);};
+  $('cPrevY').onclick=e=>{e.stopPropagation();shift(-12);};
+  $('cNextY').onclick=e=>{e.stopPropagation();shift(12);};
+  $('cTitle').onclick=e=>{e.stopPropagation();calView='year';drawCal();};
+  $('calPopup').querySelectorAll('.day').forEach(el=>el.onclick=e=>{
+    e.stopPropagation(); state.idx=+el.dataset.i; $('calPopup').classList.add('hidden'); render();});
+}
+$('calBtn').onclick=e=>{e.stopPropagation();
+  const p=$('calPopup');
+  if(p.classList.contains('hidden')){calMonth=H.dates[state.idx].slice(0,7);calView='day';drawCal();p.classList.remove('hidden');}
+  else p.classList.add('hidden');};
+document.addEventListener('click',e=>{
+  if(!$('calPopup').contains(e.target)&&e.target!==$('calBtn')) $('calPopup').classList.add('hidden');});
+
+/* ── 控制列 ─────────────────────────────── */
+function seg(el,items,get,set){
+  $(el).innerHTML=items.map(([v,l])=>`<button data-v="${v}" class="${get()===v?'on':''}">${l}</button>`).join('');
+  $(el).querySelectorAll('button').forEach(b=>b.onclick=()=>{stopPlay();set(b.dataset.v);buildControls();render();});
+}
+function buildChips(){
+  const m=metaOf(), c=combosOf()[key()];
+  $('chipBar').innerHTML=allNames().map(n=>{
+    const dis=!c[n]||c[n].insufficient_history;
+    const on=vis[state.group][n]&&!dis;
+    const anch=state.group==='industry'&&anchors.includes(n);
+    return `<button class="chip ${on?'on':''} ${dis?'dis':''}" data-n="${n}" ${dis?'disabled':''}>
+      <span class="dot" style="background:${colorOf[state.group][n]}"></span>${n}${anch?'<span class="anch">錨</span>':''}</button>`;
+  }).join('');
+  $('chipBar').querySelectorAll('.chip:not(.dis)').forEach(b=>b.onclick=()=>{
+    const n=b.dataset.n; vis[state.group][n]=!vis[state.group][n]; saveVis(); buildChips(); render();});
+}
+function buildControls(){
+  seg('segGroup',[['industry','產業輪動'],['size','規模輪動']],()=>state.group,v=>{
+    state.group=v; state.winStart=null;
+    const [,,lo,hi]=winRange(); state.idx=Math.max(lo,Math.min(hi,state.idx));});
+  seg('segWindow',[['20','20'],['60','60'],['120','120'],['240','240']],()=>String(state.win),
+    v=>{state.win=+v; state.winStart=null;});
+  seg('segWeight',[['equal','等權'],['cap','市值']],()=>state.weight,v=>state.weight=v);
+  seg('segBench',[['sector_avg','族群平均'],['taiex','加權'],['tpex','櫃買'],['combined','併權']],
+    ()=>state.bench,v=>state.bench=v);
+  buildChips();
+}
+$('selAll').onclick=()=>{allNames().forEach(n=>vis[state.group][n]=true);saveVis();buildChips();render();};
+$('selNone').onclick=()=>{allNames().forEach(n=>vis[state.group][n]=false);saveVis();buildChips();render();};
+$('tailRange').oninput=e=>{state.tail=+e.target.value;$('tailVal').textContent=state.tail+' 點';render();};
+$('ctoggle').onclick=()=>$('cbody').classList.toggle('open');
+
+/* ── 啟動 ───────────────────────────────── */
+fetch('history.json').then(r=>r.json()).then(j=>{
+  H=j; anchors=H.meta.anchors||[];
+  tradingSet=new Map(H.dates.map((d,i)=>[d,i]));
+  ['industry','size'].forEach(g=>{
+    const all=Object.keys(g==='industry'?H.sectors:H.size_items);
+    all.forEach((n,k)=>colorOf[g][n]=PALETTE[k%PALETTE.length]);   // 穩定配色
+    vis[g]=loadVis(g);
+  });
+  state.idx=plottableRange()[1]; state.winStart=null;
+  $('specNote').textContent=' '+H.meta.spec+'　n=14 k=10　成分版本 '+H.meta.sectors_version;
+  $('footMeta').textContent='計算時間 '+H.meta.generated_at+'　·　基準基礎：'+H.meta.benchmark_basis
+    +'　·　族群指數起算日不早於 '+H.meta.index_start_floor+'　·　'+H.dates.length+' 個交易日';
+  buildControls(); render();
+}).catch(e=>{$('chart').innerHTML='<div class="loading">history.json 載入失敗：'+e.message+'</div>';});
+</script>
+</body>
+</html>

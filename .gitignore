@@ -1,0 +1,10 @@
+__pycache__/
+*.pyc
+*.tmp
+.DS_Store
+# 秘密一律不進 repo（鐵律 #3：只進 GitHub Secrets）
+*.token
+*.key
+.finmind_token
+.gemini_key
+.env
