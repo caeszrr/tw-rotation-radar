@@ -228,6 +228,12 @@ const isTouch = window.matchMedia && window.matchMedia('(pointer: coarse)').matc
 
 let H=null, anchors=[], playTimer=null, calView='day', calMonth=null, tradingSet=null;
 let vis={industry:null,size:null};          // 族群顯示狀態
+/* ── 盤中即時層（Phase 4.5）──────────────────
+   資料來自 Cloudflare Worker 寫入 KV 的「原始最新價」；本頁自己算今日暫定 RS。
+   鐵則：暫定值只存在於畫面，永不寫回 history.json。                        */
+const LIVE_URL = (window.RADAR_LIVE_URL || '');   // 部署後填入 Worker 網址
+const LIVE_MS = 60000, LIVE_STALE_MS = 5*60000;
+let live = {data:null, at:0, timer:null};
 let colorOf={industry:{},size:{}};          // 穩定配色（不隨隱藏而位移）
 let state={group:'industry',win:60,weight:'equal',bench:'taiex',tail:5,idx:0,winStart:null};
 
@@ -415,6 +421,23 @@ function render(){
   Plotly.react('chart',traces,layout,
     {displayModeBar:false,responsive:true,scrollZoom:false,doubleClick:false,
      staticPlot:false,showTips:false});
+  // 盤中暫定點：空心圓 + 虛線連到水滴頭 + 「暫定」標籤（僅當日、僅盤中）
+  if(LIVE_URL && isIntraday() && state.idx===plottableRange()[1]){
+    const tv=liveTentative();
+    if(tv){
+      for(const hd of heads){
+        const t=tv[hd.n]; if(!t) continue;
+        traces.push({x:[hd.x,t.x],y:[hd.y,t.y],type:'scatter',mode:'lines',
+          line:{color:hd.col,width:1.4,dash:'dot'},hoverinfo:'skip',showlegend:false});
+        traces.push({x:[t.x],y:[t.y],name:hd.n,type:'scatter',mode:'markers',
+          marker:{size:11,color:'rgba(0,0,0,0)',line:{color:hd.col,width:2}},
+          hovertemplate:'<b>'+hd.n+'</b><br>盤中暫定（未收盤）<br>RS-Ratio %{x:.2f}<extra></extra>',
+          showlegend:false});
+      }
+      labels.push({x:AX_MAX-0.2,y:AX_MIN+0.9,xref:'x',yref:'y',text:'⬤ 空心點＝盤中暫定，未收盤',
+        showarrow:false,font:{size:10,color:'#8b98a5'},xanchor:'right'});
+    }
+  }
   const gd=$('chart');
   if(!gd._clickBound){
     gd.on('plotly_click',ev=>{const n=ev.points?.[0]?.data?.name;if(n)openSide(n);});
@@ -501,6 +524,7 @@ function syncDate(){
   $('rangeA').textContent=H.dates[s]; $('rangeB').textContent=H.dates[e];
   $('prevDay').disabled=state.idx<=lo; $('nextDay').disabled=state.idx>=hi;
   $('liveChip').textContent = state.idx===hi ? '最新收盤定稿' : '歷史定稿';
+  liveBanner();
 }
 function step(n){const [,,lo,hi]=winRange();state.idx=Math.max(lo,Math.min(hi,state.idx+n));render();}
 $('prevDay').onclick=()=>step(-1);
@@ -623,6 +647,59 @@ $('selNone').onclick=()=>{allNames().forEach(n=>vis[state.group][n]=false);saveV
 $('tailRange').oninput=e=>{state.tail=+e.target.value;$('tailVal').textContent=state.tail+' 點';render();};
 $('ctoggle').onclick=()=>$('cbody').classList.toggle('open');
 
+/* ── 盤中即時層 ─────────────────────────── */
+function tpeNow(d=new Date()){const t=new Date(d.getTime()+8*3600e3);
+  return {ymd:t.toISOString().slice(0,10),min:t.getUTCHours()*60+t.getUTCMinutes(),dow:t.getUTCDay()};}
+function isIntraday(){const n=tpeNow();
+  return n.dow!==0&&n.dow!==6&&n.min>=540&&n.min<=810;}
+/** 用暫定價把「今日」的族群指數往前推一格，算出暫定 RS-Ratio / RS-Momentum */
+function liveTentative(){
+  if(!live.data||!live.data.quotes) return null;
+  const q=live.data.quotes, c=combosOf()[key()], out={};
+  const lastIdx=plottableRange()[1];
+  const bench=state.bench==='tpex'?'o00':'t00';
+  const bq=q[bench];
+  for(const n of names()){
+    const meta=metaOf()[n];
+    const members = state.group==='industry' ? meta.members : [meta.code];
+    // 成分股當日報酬平均（缺價者不計入分母，與 §0.1 一致）
+    let sum=0,cnt=0;
+    for(const cd of members){ const r=q[cd]; if(r&&r.prev&&r.p){ sum+=r.p/r.prev-1; cnt++; } }
+    if(!cnt||!bq||!bq.prev) continue;
+    const secRet=sum/cnt, bmRet=bq.p/bq.prev-1;
+    // RS 只需相對變化：今日暫定 RS = 昨日 RS × (1+族群報酬)/(1+基準報酬)
+    const s=c[n];
+    const prevRatio=s.rs_ratio[lastIdx], prevMom=s.rs_momentum[lastIdx];
+    if(prevRatio==null||prevMom==null) continue;
+    const drift=(1+secRet)/(1+bmRet)-1;
+    out[n]={x:prevRatio*(1+drift), y:prevMom, drift};
+  }
+  return Object.keys(out).length?out:null;
+}
+async function pollLive(){
+  if(!LIVE_URL){ return; }
+  try{
+    const r=await fetch(LIVE_URL.replace(/\/$/,'')+'/latest',{cache:'no-store'});
+    const j=await r.json();
+    if(j&&j.quotes){ live.data=j; live.at=Date.parse(j.ts)||Date.now(); }
+  }catch(e){ /* 靜默：由 staleness 判斷顯示離線 */ }
+  render();
+}
+function liveBanner(){
+  const el=$('liveChip');
+  if(!LIVE_URL){ return; }
+  if(!isIntraday()){ el.textContent='最新收盤定稿'; return; }
+  const age=Date.now()-live.at;
+  if(!live.data||age>LIVE_STALE_MS){
+    const t=live.at?new Date(live.at+8*3600e3).toISOString().slice(11,16):'--:--';
+    el.textContent='即時層離線，以下為 '+t+' 資料';
+    el.style.color='#d8a657';
+  }else{
+    el.textContent='盤中暫定 · '+new Date(live.at+8*3600e3).toISOString().slice(11,16);
+    el.style.color='';
+  }
+}
+
 /* ── 啟動 ───────────────────────────────── */
 fetch('history.json').then(r=>r.json()).then(j=>{
   H=j; anchors=H.meta.anchors||[];
@@ -637,6 +714,7 @@ fetch('history.json').then(r=>r.json()).then(j=>{
   $('footMeta').textContent='計算時間 '+H.meta.generated_at+'　·　基準基礎：'+H.meta.benchmark_basis
     +'　·　族群指數起算日不早於 '+H.meta.index_start_floor+'　·　'+H.dates.length+' 個交易日';
   buildControls(); render();
+  if(LIVE_URL){ pollLive(); live.timer=setInterval(pollLive,LIVE_MS); }
 }).catch(e=>{$('chart').innerHTML='<div class="loading">history.json 載入失敗：'+e.message+'</div>';});
 </script>
 </body>
