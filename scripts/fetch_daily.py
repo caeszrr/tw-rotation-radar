@@ -31,7 +31,11 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
 PRICES = os.path.join(ROOT, "data", "prices.csv")
 TPE = timezone(timedelta(hours=8))
-RUN_ID = datetime.now(TPE).strftime("%Y-%m-%d")
+# RADAR_SIMULATE_DATE 只給演練用（模擬休市日跑一次管線）。正常執行絕不設定，
+# 設定時會在 log 印出明顯標記，避免有人把演練輸出當成正式紀錄。
+_SIM = os.environ.get("RADAR_SIMULATE_DATE", "").strip()
+RUN_ID = _SIM or datetime.now(TPE).strftime("%Y-%m-%d")
+HOLIDAYS = os.path.join(ROOT, "data", "holidays.json")
 
 U_TWSE = "https://openapi.twse.com.tw/v1/exchangeReport/STOCK_DAY_ALL"
 U_TPEX = "https://www.tpex.org.tw/openapi/v1/tpex_mainboard_daily_close_quotes"
@@ -136,6 +140,31 @@ def expected_universe():
     return u
 
 
+def holiday_map():
+    """
+    讀 data/holidays.json → {'YYYY-MM-DD': 名稱}。
+
+    **格式紀律（2026-08-13）**：holidays.py 寫出的是**物件陣列** `[{date,name,desc}]`。
+    Worker 那邊曾因為假設它是字串陣列而讓休市日防護整條失效，且測試餵假格式所以全綠。
+    這裡一律以真實檔案格式為準，並同樣容忍字串陣列（不製造第二套假設）。
+    檔案不存在/壞掉時回空 dict —— 不阻擋管線（與 holidays.py 的 L7 紀律一致）。
+    """
+    try:
+        with open(HOLIDAYS, encoding="utf-8") as f:
+            raw = json.load(f)
+    except Exception as e:                                   # noqa: BLE001
+        log("L7-warn", f"讀不到休市日曆（不阻擋）：{e}")
+        return {}
+    items = raw.get("dates", raw) if isinstance(raw, dict) else raw
+    out = {}
+    for r in items or []:
+        if isinstance(r, str):
+            out[r[:10]] = ""
+        elif isinstance(r, dict) and r.get("date"):
+            out[str(r["date"])[:10]] = r.get("name") or r.get("desc") or ""
+    return out
+
+
 def read_prices():
     rows, codes = [], set()
     with open(PRICES, encoding="utf-8", newline="") as f:
@@ -146,7 +175,22 @@ def read_prices():
 
 
 def main():
+    if _SIM:
+        log("L0-SIMULATE", f"演練模式：RADAR_SIMULATE_DATE={_SIM}（正常執行不會出現這一行）")
     log("L1-start", "每日增量開始")
+
+    # ── L7 休市日：成功 + 心跳 + 零告警（藍圖第九節）──────────────
+    # 放在所有網路呼叫【之前】：休市日應該零請求、零成本、零雜訊。
+    # 在此之前，管線根本沒有休市日分支 —— 休市日是靠「官方端點還是昨天的資料 →
+    # day <= latest → L7-noop」間接達成的，也就是說它和冪等走同一條路徑，
+    # 兩者無法分辨；holidays.py 抓來的日曆從來沒有任何程式讀過。
+    hol = holiday_map()
+    if RUN_ID in hol:
+        log("L7-holiday", f"{RUN_ID} 為官方休市日（{hol[RUN_ID] or '無名稱'}）"
+                          f"→ 不抓取、不寫入、不發布，正常結束（心跳照發、零告警）")
+        return 0
+    log("L7-ok", f"{RUN_ID} 非官方休市日（日曆共 {len(hol)} 筆）")
+
     rows, present = read_prices()
     tracked = expected_universe()
     # L3-a：先驗「歷史檔本身」是否完整——截斷的 prices.csv 必須當場擋下
