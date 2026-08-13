@@ -8,6 +8,11 @@ on:
     - cron: '50 9 * * 1-5'
     - cron: '30 11 * * 1-5'
   workflow_dispatch:
+    inputs:
+      test_telegram:
+        description: '成功後補發一則測試通知到 Telegram（只有手動觸發才會發，排程不發）'
+        type: boolean
+        default: true
 
 concurrency:
   group: daily-${{ github.ref }}
@@ -40,6 +45,13 @@ jobs:
           RUN_ID=$(TZ=Asia/Taipei date +%F)
           echo "run_id=$RUN_ID" >> "$GITHUB_OUTPUT"
           echo "今日(台北) = $RUN_ID"
+
+      # 只印「有沒有設、長度、sha256 指紋」，永不印值或值的任何子字串。
+      # Telegram 另打一次 getMe，真的驗證 token 有效（不只是「有設定」）。
+      # 不擋管線：缺 token 的紀律一直是「優雅跳過」，不是讓整條線倒下。
+      - name: Secrets 自檢（masked，永不印全值）
+        continue-on-error: true
+        run: python scripts/notify.py mask
 
       - name: L7 休市日曆檢查（TWSE 官方）
         id: cal
@@ -86,6 +98,15 @@ jobs:
       - name: L4 成功心跳（最後一步；沒有 ping 就是事故）
         if: success()
         run: python scripts/notify.py ping daily
+
+      # 只有手動觸發且勾選才發。排程跑【不會】發成功通知——
+      # 每天一則「今天沒事」的訊息會讓人很快學會無視它，
+      # 真的出事那則就跟著被無視了。日常靠 Healthchecks 的「沒收到就叫」。
+      - name: 測試通知（僅手動觸發）
+        if: success() && github.event_name == 'workflow_dispatch' && inputs.test_telegram
+        run: |
+          python scripts/notify.py ok "${{ steps.guard.outputs.run_id }}" \
+            "測試通知：三個 Secret 已接上並驗證通過。發布=${{ steps.publish.outputs.published }}。收到這則代表失敗告警管道可用。"
 
       - name: 任一步驟失敗 → 心跳報失敗 + Telegram
         if: failure()
