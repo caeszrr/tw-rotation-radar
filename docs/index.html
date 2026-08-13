@@ -688,7 +688,7 @@ function syncDate(){
   setFill(); setDateLabel(state.idx);
   $('rangeA').textContent=H.dates[s]; $('rangeB').textContent=H.dates[e];
   $('prevDay').disabled=state.idx<=lo; $('nextDay').disabled=state.idx>=hi;
-  $('liveChip').textContent = state.idx===hi ? '最新收盤定稿' : '歷史定稿';
+  applyClosedChip(hi);
   liveBanner();
 }
 function step(n){const [,,lo,hi]=winRange();state.idx=Math.max(lo,Math.min(hi,state.idx+n));render();}
@@ -877,10 +877,25 @@ async function pollLive(){
   }catch(e){ /* 靜默：由 staleness 判斷顯示離線 */ }
   render();
 }
+/* ── 收盤狀態 chip（含資料落後提示）───────────────────
+   2026-08-14 新增。起因：有人看到的是「最新收盤定稿」四個字，卻不知道那是
+   三天前的收盤 —— 管線停掉跟今天沒行情長得一模一樣，正是本專案一路在打的靜默失敗。
+   超過 4 天就改印實際日期與落後天數，並轉琥珀色。
+   （4 天可涵蓋週五收盤→週一早上、以及一天連假；春節長假會提示，
+     但那時印的是事實「最新收盤 02-13（9 天前）」，不是誤報。） */
+function applyClosedChip(hi){
+  const el=$('liveChip');
+  if(state.idx!==hi){ el.textContent='歷史定稿'; el.style.color=''; return; }
+  const d=H.dates[hi];
+  const age=Math.floor((Date.now()-Date.parse(d+'T13:30:00+08:00'))/86400000);
+  if(age>4){ el.textContent='最新收盤 '+d.slice(5)+'（'+age+' 天前）'; el.style.color='#d8a657'; }
+  else{ el.textContent='最新收盤定稿'; el.style.color=''; }
+}
 function liveBanner(){
   const el=$('liveChip');
   if(!LIVE_URL){ return; }
-  if(!isIntraday()){ el.textContent='最新收盤定稿'; return; }
+  // 非盤中就交還給 applyClosedChip()，不要用「最新收盤定稿」蓋掉資料落後提示
+  if(!isIntraday()){ applyClosedChip(plottableRange()[1]); return; }
   const age=Date.now()-live.at;
   if(!live.data||age>LIVE_STALE_MS){
     const t=live.at?new Date(live.at+8*3600e3).toISOString().slice(11,16):'--:--';
@@ -900,7 +915,10 @@ window.__playing=()=>playing; window.__paint=t=>paintTails(t===true); window.__d
 window.__setDegraded=v=>{cvDegraded=!!v;};        // 驗收用：強制走降級路徑，證明它真的畫得出來
 
 /* ── 啟動 ───────────────────────────────── */
-fetch('history.json').then(r=>r.json()).then(j=>{
+/* cache:'no-cache' = 每次都先向伺服器驗證新舊，沒變才用快取（回 304，不重下 5MB）。
+   預設的 'default' 會在 max-age(600s) 內直接吃本機快取，回訪者可能看到舊資料而
+   畫面上毫無跡象 —— 又一種靜默失敗。代價只有一次條件式請求。 */
+fetch('history.json',{cache:'no-cache'}).then(r=>r.json()).then(j=>{
   H=j; anchors=H.meta.anchors||[];
   tradingSet=new Map(H.dates.map((d,i)=>[d,i]));
   ['industry','size'].forEach(g=>{
