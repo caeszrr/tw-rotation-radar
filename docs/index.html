@@ -4,6 +4,8 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <title>台股輪動雷達</title>
+<link rel="icon" href="data:,">   <!-- 沒有 favicon：明講，省下每次載入必發的一個 404 -->
+
 <style>
 :root{
   --bg:#0d1117; --panel:#131a22; --panel2:#0f151c; --line:#243040;
@@ -110,8 +112,19 @@ input[type=range].tail{flex:1;min-width:110px;accent-color:var(--accent)}
 .main{display:grid;grid-template-columns:1fr;gap:10px}
 /* 修正4：允許單指垂直捲動穿透圖表 */
 #chart{background:var(--panel);border:1px solid var(--line);border-radius:12px;
-  height:min(72vh,620px);min-height:380px;touch-action:pan-y;width:100%;max-width:100%;overflow:hidden}
+  height:min(72vh,620px);min-height:380px;touch-action:pan-y;width:100%;max-width:100%;overflow:hidden;
+  position:relative}
 #chart .nsewdrag,#chart .drag{touch-action:pan-y !important}
+/* ── 尾巴 v3：canvas overlay ─────────────────────────────
+   尾巴不再由 Plotly 畫（分段多邊形是 v1/v2 兩代縫線與尖刺的根因），改畫在這層
+   canvas 上。pointer-events:none 讓所有滑鼠/觸控事件穿透回 Plotly，hover 與點選
+   完全不受影響。
+   z-index 疊法：Plotly 會產生數個絕對定位的 .main-svg 兄弟層，最後一層裝的是
+   infolayer（族群標籤）與 hoverlayer（滑鼠提示框）——那一層必須壓在 canvas 之上，
+   否則提示框會被尾巴蓋住。底下的 .main-svg（象限底色、格線、軸）則壓在 canvas 之下。 */
+#tailCv{position:absolute;inset:0;pointer-events:none;z-index:2}
+#chart .main-svg{z-index:1}
+#chart .main-svg:last-of-type{z-index:3}
 .refused{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:8px 12px;margin-top:8px;
   color:var(--dim);font-size:11.5px}
 .refused b{color:#d8a657}
@@ -197,7 +210,7 @@ footer b{color:var(--dim);font-weight:600}
     </div>
   </div>
 
-  <div class="main"><div id="chart"><div class="loading">載入中…</div></div></div>
+  <div class="main"><div id="chart"><div class="loading">載入中…</div><canvas id="tailCv"></canvas></div></div>
   <div class="refused" id="refused" style="display:none"></div>
 
   <section class="panel">
@@ -219,6 +232,7 @@ footer b{color:var(--dim);font-weight:600}
 <div class="drawer" id="drawer"><div class="sheet" id="sheet"></div></div>
 
 <script src="plotly.min.js"></script>
+<script src="perfect-freehand.js"></script>
 <script>
 const QLAB={LEADING:'領先',IMPROVING:'改善',LAGGING:'落後',WEAKENING:'弱化'};
 const PALETTE=['#ff6b6b','#ffd166','#06d6a0','#4cc9f0','#b388ff','#f78c6b','#8ac926',
@@ -226,7 +240,7 @@ const PALETTE=['#ff6b6b','#ffd166','#06d6a0','#4cc9f0','#b388ff','#f78c6b','#8ac
 const AX_MIN=94, AX_MAX=106;
 const isTouch = window.matchMedia && window.matchMedia('(pointer: coarse)').matches;
 
-let H=null, anchors=[], playTimer=null, calView='day', calMonth=null, tradingSet=null;
+let H=null, anchors=[], calView='day', calMonth=null, tradingSet=null;
 let vis={industry:null,size:null};          // 族群顯示狀態
 /* ── 盤中即時層（Phase 4.5）──────────────────
    資料來自 Cloudflare Worker 寫入 KV 的「原始最新價」；本頁自己算今日暫定 RS。
@@ -306,11 +320,29 @@ function quadAnnos(){
     q(AX_MAX-.15,AX_MIN+.3,'WEAKENING 弱化',11,'#d8c27a',.85,'right','bottom'),
   ];
 }
-/* ── 水滴尾巴幾何 ───────────────────────────
-   以尾巴路徑為中軸，沿法線擴寬成連續漸縮實體：頭部最寬、尾端趨近 0，
-   並把實體切成 SEG 段、每段自己的 alpha，做出「頭濃尾淡」的漸層。
-   法線在【像素空間】計算，所以視覺寬度不會因 x/y 軸像素比不同而歪掉。      */
-const SEG=12, DENSE=14, HEAD_W_PX=6.4, OVERLAP=1;
+/* ══ 尾巴 v3：canvas overlay + perfect-freehand ══════════════════════════
+   決策 #24。v1（大小漸變圓點串）與 v2（Plotly 分段多邊形）都死在同一個地方：
+   用「一段一段的多邊形」去近似一條可變寬度的曲線，段界必然要嘛露縫（看起來像
+   疊起來的木板），要嘛在轉折處外翻成尖刺。這不是參數沒調好，是方法本身的極限。
+
+   v3 改成畫家真正的做法：把整條路徑當成【一筆】可變寬度的筆畫，由
+   perfect-freehand 算出單一封閉外框，一次 fill，並用沿路徑的線性漸層做頭濃尾淡。
+   沒有段，就沒有縫，也沒有段界尖刺。
+
+   明列禁做（皆為已踩過的坑，不要再回頭）：
+     ✗ 分段矩形／梯形堆疊          → v2 的縫線根因
+     ✗ 稀疏等距點直接法線偏移      → 轉折處尖刺根因（必須先 Catmull-Rom 加密）
+     ✗ 全條均勻低 alpha            → 看不出頭尾方向，等於沒有尾巴
+     ✗ scattergl fill              → 大量半透明重疊時的破圖
+   ═══════════════════════════════════════════════════════════════════════ */
+const TAIL_SIZE   = () => isTouch ? 6 : 8;      // 筆畫寬度（頭部）
+const HEAD_R      = () => isTouch ? 3.5 : 4;    // 頭點半徑
+const RESAMPLE_HI = 56;                          // 正常重取樣點數（規格 40–64）
+const RESAMPLE_LO = 28;                          // 降級後點數（規格 24–32）
+const HEAD_A = 0.95, DIM_A = 0.25;              // 頭部 alpha／未聚焦衰減
+/* 深色底上多條半透明尾巴重疊若出現暗斑，把這個改成 'lighter'（規格 3 的備案）。
+   預設 source-over：目前配色下重疊處是自然加亮，沒有暗斑。 */
+const TAIL_BLEND = 'source-over';
 /** 向心(centripetal, alpha=0.5) Catmull-Rom：不會像均勻參數化那樣在轉折處過衝或打結 */
 function catmull(P0,P1,P2,P3,t){
   const al=0.5;
@@ -323,85 +355,227 @@ function catmull(P0,P1,P2,P3,t){
   const B1=lerp(A1,A2,t0,t2),B2=lerp(A2,A3,t1,t3);
   return lerp(B1,B2,t1,t2);
 }
-function densify(pts,k){
-  const q=[];                                   // 去除重合點：零長度切線會產生尖刺
-  for(const p of pts) if(!q.length||Math.hypot(p[0]-q[q.length-1][0],p[1]-q[q.length-1][1])>1e-9) q.push(p);
-  if(q.length<2) return q.slice();
-  const e=[q[0],...q,q[q.length-1]], out=[];
-  for(let i=1;i<e.length-2;i++)
-    for(let j=0;j<k;j++) out.push(catmull(e[i-1],e[i],e[i+1],e[i+2],j/k));
-  out.push(q[q.length-1]);
-  return out;
-}
 function rgba(hex,a){
   const h=hex.replace('#','');
   const r=parseInt(h.slice(0,2),16),g=parseInt(h.slice(2,4),16),b=parseInt(h.slice(4,6),16);
   return `rgba(${r},${g},${b},${a})`;
 }
-/** 回傳這條水滴的填充多邊形 traces（不含頭點與 hover） */
-function teardrop(pts,col,pxPerX,pxPerY){
-  const D=densify(pts,DENSE), M=D.length;
-  if(M<2) return [];
-  const L=[],R=[];
-  for(let i=0;i<M;i++){
-    const a=D[Math.max(0,i-1)], b=D[Math.min(M-1,i+1)];
-    let tx=(b[0]-a[0])*pxPerX, ty=(b[1]-a[1])*pxPerY;
-    const len=Math.hypot(tx,ty)||1; tx/=len; ty/=len;
-    const u=i/(M-1);                       // 0=尾端 1=頭部
-    const wpx=HEAD_W_PX*Math.pow(u,1.05);  // 尾端趨近 0，頭部最寬
-    const nx=-ty*wpx/pxPerX, ny=tx*wpx/pxPerY;
-    L.push([D[i][0]+nx, D[i][1]+ny]); R.push([D[i][0]-nx, D[i][1]-ny]);
-  }
-  const out=[];
-  for(let s=0;s<SEG;s++){
-    const a=Math.max(0,Math.floor(s*(M-1)/SEG)-(s?OVERLAP:0)), b=Math.floor((s+1)*(M-1)/SEG);
-    if(b<=a) continue;
-    const xs=[],ys=[];
-    for(let i=a;i<=b;i++){xs.push(L[i][0]);ys.push(L[i][1]);}
-    for(let i=b;i>=a;i--){xs.push(R[i][0]);ys.push(R[i][1]);}
-    xs.push(L[a][0]); ys.push(L[a][1]);
-    const u=(s+0.5)/SEG;
-    out.push({x:xs,y:ys,type:'scatter',mode:'lines',fill:'toself',
-      fillcolor:rgba(col,0.10+0.62*Math.pow(u,1.2)),
-      line:{width:0,color:'rgba(0,0,0,0)'},hoverinfo:'skip',showlegend:false});
+/** 去除重合點：零長度切線是尖刺的來源之一 */
+function dedupe(pts){
+  const q=[];
+  for(const p of pts) if(!q.length||Math.hypot(p[0]-q[q.length-1][0],p[1]-q[q.length-1][1])>1e-6) q.push(p);
+  return q;
+}
+/** 向心 Catmull-Rom 加密 → 依弧長等距重取樣至 target 點。
+    直接把 5 個稀疏交易日餵給 getStroke 會在每個轉折冒尖角；必須先加密成平滑曲線。 */
+function resamplePath(pts,target){
+  const q=dedupe(pts);
+  if(q.length<2) return q;
+  const e=[q[0],...q,q[q.length-1]], dense=[];
+  const k=Math.max(6,Math.ceil(target/(q.length-1))*3);
+  for(let i=1;i<e.length-2;i++)
+    for(let j=0;j<k;j++) dense.push(catmull(e[i-1],e[i],e[i+1],e[i+2],j/k));
+  dense.push(q[q.length-1]);
+  // 弧長等距重取樣
+  const cum=[0];
+  for(let i=1;i<dense.length;i++)
+    cum.push(cum[i-1]+Math.hypot(dense[i][0]-dense[i-1][0],dense[i][1]-dense[i-1][1]));
+  const total=cum[cum.length-1];
+  if(!(total>0)) return [dense[0],dense[dense.length-1]];
+  const out=[]; let j=0;
+  for(let i=0;i<target;i++){
+    const want=total*i/(target-1);
+    while(j<cum.length-2&&cum[j+1]<want) j++;
+    const seg=(cum[j+1]-cum[j])||1e-9, t=Math.min(1,Math.max(0,(want-cum[j])/seg));
+    out.push([dense[j][0]+(dense[j+1][0]-dense[j][0])*t,
+              dense[j][1]+(dense[j+1][1]-dense[j][1])*t]);
   }
   return out;
 }
+/** perfect-freehand 的外框點 → Path2D（二次曲線走中點，官方 SVG 版的 canvas 等價寫法） */
+function strokeToPath(s){
+  const p=new Path2D();
+  if(s.length<2) return p;
+  p.moveTo((s[0][0]+s[s.length-1][0])/2,(s[0][1]+s[s.length-1][1])/2);
+  for(let i=0;i<s.length;i++){
+    const a=s[i], b=s[(i+1)%s.length];
+    p.quadraticCurveTo(a[0],a[1],(a[0]+b[0])/2,(a[1]+b[1])/2);
+  }
+  p.closePath();
+  return p;
+}
+/* ── canvas 狀態 ─────────────────────────── */
+let frames=[];                 // [{n,col,pts:[[資料x,資料y]…舊→新], live:{x,y}|null}]
+let focusName=null;            // focus+context：聚焦的族群名
+let cvSlow=0, cvDegraded=false;// 效能護欄
+let rafId=null, playing=false, playAcc=0, playLast=0;
 
-function render(){
-  const c=combosOf()[key()], ns=names(), i=state.idx, traces=[], heads=[];
-  const el=$('chart');
-  const pxPerX=Math.max(1,(el.clientWidth||900)-62)/(AX_MAX-AX_MIN);
-  const pxPerY=Math.max(1,(el.clientHeight||520)-56)/(AX_MAX-AX_MIN);
-  // 尺寸於下方 layout 明確指定
-  ns.forEach(n=>{
+/** 資料座標 → 像素（Plotly 內部軸換算，含繪圖區偏移） */
+function axisMap(){
+  const gd=$('chart'), fl=gd&&gd._fullLayout;
+  if(!fl||!fl.xaxis||typeof fl.xaxis.d2p!=='function') return null;
+  const xa=fl.xaxis, ya=fl.yaxis;
+  return {x:v=>xa._offset+xa.d2p(v), y:v=>ya._offset+ya.d2p(v),
+          clip:{x:xa._offset,y:ya._offset,w:xa._length,h:ya._length}};
+}
+function ctx2d(){
+  const cv=$('tailCv'), el=$('chart');
+  if(!cv||!el) return null;
+  if(cv.parentNode!==el) el.appendChild(cv);        // Plotly 重建 DOM 時把 canvas 收回來
+  const w=el.clientWidth, h=el.clientHeight, dpr=window.devicePixelRatio||1;
+  const W=Math.round(w*dpr), Hh=Math.round(h*dpr);
+  if(cv.width!==W||cv.height!==Hh){ cv.width=W; cv.height=Hh; cv.style.width=w+'px'; cv.style.height=h+'px'; }
+  const c=cv.getContext('2d');
+  c.setTransform(dpr,0,0,dpr,0,0);                  // 之後一律用 CSS 像素思考
+  c.clearRect(0,0,w,h);
+  return c;
+}
+/** 畫一條尾巴（規格 2–4）。thin=true 為降級模式：細等寬線 + 頭點。 */
+function drawTail(c,f,m,alphaMul,thin){
+  const px=f.pts.map(p=>[m.x(p[0]),m.y(p[1])]);
+  const head=px[px.length-1];
+  if(px.length>1){
+    if(thin){
+      const rs=resamplePath(px,RESAMPLE_LO);
+      c.beginPath(); c.moveTo(rs[0][0],rs[0][1]);
+      for(let i=1;i<rs.length;i++) c.lineTo(rs[i][0],rs[i][1]);
+      c.strokeStyle=rgba(f.col,HEAD_A*alphaMul*0.8); c.lineWidth=1.6;
+      c.lineCap='round'; c.lineJoin='round'; c.stroke();
+    }else{
+      // 頭在前、尾在後：perfect-freehand 的 taper 作用在【end】，所以要反向餵入
+      const rs=resamplePath(px,cvDegraded?RESAMPLE_LO:RESAMPLE_HI).slice().reverse();
+      const stroke=window.getStroke(rs,{
+        size:TAIL_SIZE(), thinning:0.6, smoothing:0.5, streamline:0.4,
+        // 關掉模擬筆壓：我們要的是「頭寬→尾尖」的確定形狀，
+        // 不是隨速度亂變的粗細（那會讓同一條尾巴每天長得不一樣）。
+        simulatePressure:false, last:true,
+        start:{cap:true, taper:0},
+        end:{cap:false, taper:true, easing:t=>t*t},
+      });
+      const tail=px[0];
+      const g=c.createLinearGradient(head[0],head[1],tail[0],tail[1]);
+      g.addColorStop(0, rgba(f.col,HEAD_A*alphaMul));
+      g.addColorStop(1, rgba(f.col,0));
+      c.fillStyle=g; c.fill(strokeToPath(stroke));
+    }
+  }
+  // 頭點：實心圓 + 同色光暈（畫完立刻歸零，否則會汙染後續所有繪製）
+  const r=HEAD_R();
+  c.save();
+  c.shadowColor=rgba(f.col,0.9*alphaMul); c.shadowBlur=6;
+  c.fillStyle=rgba(f.col,Math.min(1,alphaMul));
+  c.beginPath(); c.arc(head[0],head[1],r,0,Math.PI*2); c.fill();
+  c.restore();
+  c.shadowBlur=0;
+  // 盤中暫定點：虛線 + 空心圓（v2 曾把它 push 到 Plotly.react 之後，永遠畫不出來）
+  if(f.live){
+    const lx=m.x(f.live.x), ly=m.y(f.live.y);
+    c.save();
+    c.setLineDash([3,3]); c.strokeStyle=rgba(f.col,0.75*alphaMul); c.lineWidth=1.4;
+    c.beginPath(); c.moveTo(head[0],head[1]); c.lineTo(lx,ly); c.stroke();
+    c.setLineDash([]); c.lineWidth=2;
+    c.beginPath(); c.arc(lx,ly,5.5,0,Math.PI*2); c.stroke();
+    c.restore();
+  }
+}
+/** 重畫整層 canvas。回傳耗時 ms（給效能護欄用）。 */
+function paintTails(thin){
+  const t0=performance.now();
+  const c=ctx2d(), m=axisMap();
+  if(!c||!m) return 0;
+  c.save();
+  c.beginPath(); c.rect(m.clip.x,m.clip.y,m.clip.w,m.clip.h); c.clip();  // 不畫出繪圖區
+  c.globalCompositeOperation=TAIL_BLEND;
+  const dim = focusName!=null;
+  for(const f of frames){
+    if(dim && f.n===focusName) continue;                 // 聚焦的最後畫，蓋在最上層
+    drawTail(c,f,m, dim?DIM_A:1, thin===true);
+  }
+  if(dim){ const f=frames.find(z=>z.n===focusName); if(f) drawTail(c,f,m,1,thin===true); }
+  if(playing){                                            // 播放中 Plotly 標籤停更，改由 canvas 畫
+    c.globalCompositeOperation='source-over';
+    c.font='11px system-ui,sans-serif'; c.textBaseline='middle';
+    for(const f of frames){
+      const p=f.pts[f.pts.length-1];
+      c.fillStyle=rgba(f.col,0.92);
+      c.fillText(f.n, m.x(p[0])+9, m.y(p[1]));
+    }
+  }
+  c.restore();
+  return performance.now()-t0;
+}
+/** 效能護欄：連續 3 幀超過一個 60fps 幀時距就降級（規格 7） */
+function guardPerf(ms){
+  if(ms>16.67){ if(++cvSlow>=3 && !cvDegraded){ cvDegraded=true;
+      console.log('[radar] 尾巴繪製降級：重取樣 '+RESAMPLE_HI+'→'+RESAMPLE_LO+' 點'); } }
+  else cvSlow=0;
+}
+function redrawTails(){ guardPerf(paintTails(playing&&cvDegraded)); }
+
+/** 只重算 frames（資料座標），不碰 Plotly。播放中每格只需要這個 + redrawTails()。 */
+function buildFrames(){
+  const c=combosOf()[key()], ns=names(), i=state.idx;
+  const showLive = !!(LIVE_URL && isIntraday() && state.idx===plottableRange()[1]);
+  const tv = showLive ? liveTentative() : null;
+  frames=[];
+  for(const n of ns){
     const s=c[n], col=colorOf[state.group][n];
     const pts=[],txt=[]; const from=Math.max(0,i-state.tail+1);
     for(let j=from;j<=i;j++){
       if(s.rs_ratio[j]==null||s.rs_momentum[j]==null) continue;
       pts.push([s.rs_ratio[j],s.rs_momentum[j]]); txt.push(H.dates[j]);
     }
-    if(!pts.length) return;
-    const N=pts.length;
-    // 1) 水滴實體（歷史中間點不再畫獨立圓點）
-    if(N>1) traces.push(...teardrop(pts,col,pxPerX,pxPerY));
-    // 2) 沿中軸鋪不可見 hover 點：各日數值仍讀得到
-    traces.push({x:pts.map(p=>p[0]),y:pts.map(p=>p[1]),customdata:txt,name:n,
-      type:'scatter',mode:'markers',marker:{size:16,color:col,opacity:0},
-      hoverlabel:{bgcolor:'#131a22'},showlegend:false,
-      hovertemplate:'<b>'+n+'</b><br>%{customdata}<br>RS-Ratio %{x:.2f}　動能 %{y:.2f}<extra></extra>'});
-    // 3) 頭部實心圓點
-    traces.push({x:[pts[N-1][0]],y:[pts[N-1][1]],name:n,type:'scatter',mode:'markers',
-      marker:{size:9,color:col,line:{width:0}},hoverinfo:'skip',showlegend:false});
-    heads.push({n,x:pts[N-1][0],y:pts[N-1][1],col});
-  });
-  const h=($('chart').clientHeight||520)-70;
+    if(!pts.length) continue;
+    frames.push({n,col,pts,txt,live:(tv&&tv[n])?{x:tv[n].x,y:tv[n].y}:null});
+  }
+  return frames;
+}
+
+/** 族群標籤（Plotly annotations）。focus+context：聚焦時只留那一條，其餘讓路。 */
+function labelAnnos(){
+  const heads=frames.map(f=>({n:f.n,col:f.col,x:f.pts[f.pts.length-1][0],y:f.pts[f.pts.length-1][1]}));
+  const h=(($('chart').clientHeight)||520)-70;
   const gap=(AX_MAX-AX_MIN)*16/Math.max(120,h);
   heads.sort((a,b)=>b.y-a.y);
   let last=Infinity;
   heads.forEach(hd=>{const ly=Math.min(hd.y,last-gap);hd.ly=ly;last=ly;});
-  const labels=heads.map(hd=>({x:hd.x,y:hd.ly,xref:'x',yref:'y',text:hd.n,showarrow:false,
+  const shown = focusName==null ? heads : heads.filter(hd=>hd.n===focusName);
+  const out=shown.map(hd=>({x:hd.x,y:(focusName==null?hd.ly:hd.y),xref:'x',yref:'y',text:hd.n,showarrow:false,
     font:{size:11,color:hd.col},xanchor:'left',xshift:9,bgcolor:'rgba(13,17,23,.62)',borderpad:2}));
+  if(frames.some(f=>f.live))
+    out.push({x:AX_MAX-0.2,y:AX_MIN+0.9,xref:'x',yref:'y',text:'○ 空心點＝盤中暫定，未收盤',
+      showarrow:false,font:{size:10,color:'#8b98a5'},xanchor:'right'});
+  return out;
+}
+/** 只有聚焦狀態改變時走這條：資料沒動，不必重跑 Plotly.react，
+    只換標籤 + 重畫 canvas。hover 是每秒可能觸發很多次的路徑，不能走全量重繪。 */
+function setFocus(n){
+  if(n===focusName) return;
+  focusName=n;
+  try{ Plotly.relayout('chart',{annotations:quadAnnos().concat(labelAnnos())}); }catch(e){}
+  redrawTails();
+}
+
+function render(){
+  const traces=[];
+  buildFrames();
+  // Plotly 只留：象限、軸、hover、標籤、點選。尾巴與頭點一律交給 canvas。
+  for(const f of frames){
+    // 沿中軸鋪不可見 hover 點：各日數值仍讀得到（hover 與點選都靠這層）
+    traces.push({x:f.pts.map(p=>p[0]),y:f.pts.map(p=>p[1]),customdata:f.txt,name:f.n,
+      type:'scatter',mode:'markers',marker:{size:16,color:f.col,opacity:0},
+      hoverlabel:{bgcolor:'#131a22'},showlegend:false,
+      hovertemplate:'<b>'+f.n+'</b><br>%{customdata}<br>RS-Ratio %{x:.2f}　動能 %{y:.2f}<extra></extra>'});
+    // 盤中暫定點的 hover（視覺畫在 canvas；這層只負責被滑到時說話）
+    // v2 的 bug：這兩件事都被 push 到 Plotly.react【之後】，所以永遠不會出現。
+    if(f.live){
+      traces.push({x:[f.live.x],y:[f.live.y],name:f.n,type:'scatter',mode:'markers',
+        marker:{size:18,color:f.col,opacity:0},showlegend:false,
+        hovertemplate:'<b>'+f.n+'</b><br>盤中暫定（未收盤）<br>RS-Ratio %{x:.2f}<extra></extra>'});
+    }
+  }
+  const el=$('chart');
+  const labels=labelAnnos();
 
   // 明確指定像素尺寸：responsive:true 只在 window resize 事件時重算，
   // 手機初次載入（無 resize 事件）會沿用錯誤寬度，導致右側象限被裁掉。
@@ -421,26 +595,17 @@ function render(){
   Plotly.react('chart',traces,layout,
     {displayModeBar:false,responsive:true,scrollZoom:false,doubleClick:false,
      staticPlot:false,showTips:false});
-  // 盤中暫定點：空心圓 + 虛線連到水滴頭 + 「暫定」標籤（僅當日、僅盤中）
-  if(LIVE_URL && isIntraday() && state.idx===plottableRange()[1]){
-    const tv=liveTentative();
-    if(tv){
-      for(const hd of heads){
-        const t=tv[hd.n]; if(!t) continue;
-        traces.push({x:[hd.x,t.x],y:[hd.y,t.y],type:'scatter',mode:'lines',
-          line:{color:hd.col,width:1.4,dash:'dot'},hoverinfo:'skip',showlegend:false});
-        traces.push({x:[t.x],y:[t.y],name:hd.n,type:'scatter',mode:'markers',
-          marker:{size:11,color:'rgba(0,0,0,0)',line:{color:hd.col,width:2}},
-          hovertemplate:'<b>'+hd.n+'</b><br>盤中暫定（未收盤）<br>RS-Ratio %{x:.2f}<extra></extra>',
-          showlegend:false});
-      }
-      labels.push({x:AX_MAX-0.2,y:AX_MIN+0.9,xref:'x',yref:'y',text:'⬤ 空心點＝盤中暫定，未收盤',
-        showarrow:false,font:{size:10,color:'#8b98a5'},xanchor:'right'});
-    }
-  }
+  redrawTails();                                  // Plotly 畫完才有正確的軸換算
   const gd=$('chart');
   if(!gd._clickBound){
     gd.on('plotly_click',ev=>{const n=ev.points?.[0]?.data?.name;if(n)openSide(n);});
+    // focus+context（規格 5）：hover 到哪條就凸顯哪條，其餘壓到 25%
+    gd.on('plotly_hover',ev=>{const n=ev.points?.[0]?.data?.name; if(n) setFocus(n);});
+    gd.on('plotly_unhover',()=>setFocus(null));
+    // 版面/縮放變動 → 像素座標全部作廢，必須重算重畫（規格 6）
+    gd.on('plotly_relayout',redrawTails);
+    gd.on('plotly_relayouting',redrawTails);
+    window.addEventListener('resize',redrawTails);
     // 容器尺寸變動（手機初次版面落定、轉向、控制列展開）→ 強制重算繪圖區，
     // 否則 Plotly 會沿用初次量到的寬度，在手機上把右側象限標籤裁掉。
     if(window.ResizeObserver){
@@ -530,28 +695,55 @@ function step(n){const [,,lo,hi]=winRange();state.idx=Math.max(lo,Math.min(hi,st
 $('prevDay').onclick=()=>step(-1);
 $('nextDay').onclick=()=>step(1);
 
-// 拖曳中：只動填充/圓點/日期，不重設 min/max、不重繪圖表
+// 拖曳中：只動填充/日期/canvas，不重設 min/max、不重跑 Plotly。
+// v3 之前尾巴在 Plotly 裡，拖曳時只能靜止不動；現在尾巴在 canvas，重畫夠便宜，
+// 可以逐日跟著滑桿走 —— 這正是當初「圓點逐日同步」想要的效果。
 $('dateSlider').addEventListener('input',e=>{
   state.idx=+e.target.value; setFill(); setDateLabel(state.idx);
+  if(H){ buildFrames(); redrawTails(); }
 });
 // 放開才重繪
 $('dateSlider').addEventListener('change',e=>{ state.idx=+e.target.value; render(); });
 
-function stopPlay(){ if(playTimer){clearInterval(playTimer);playTimer=null;}
-  $('playBtn').textContent='▶'; $('playBtn').classList.remove('on'); }
+/* ── 播放：自建 rAF 迴圈驅動 canvas（規格 6）─────────────────
+   舊版每格呼叫一次 render() → 每格一次完整 Plotly.react，那是整個播放最貴的一步。
+   新版播放中【完全不碰 Plotly】：只重算 frames 與重畫 canvas，族群標籤改由 canvas 畫。
+   停格才做一次完整 render() 把 Plotly 標籤與完整水滴補回來。
+   明令禁用 Plotly.animate 畫尾巴。                                        */
+const PLAY_MS=300;
+function stopPlay(){
+  if(rafId){ cancelAnimationFrame(rafId); rafId=null; }
+  const was=playing; playing=false; playAcc=0; playLast=0;
+  $('playBtn').textContent='▶'; $('playBtn').classList.remove('on');
+  if(was) render();                               // 停格 → 完整水滴 + Plotly 標籤回來
+}
+function playLoop(ts){
+  if(!playing) return;
+  if(!playLast) playLast=ts;
+  playAcc+=ts-playLast; playLast=ts;
+  const [,ee]=winRange();
+  let moved=false;
+  while(playAcc>=PLAY_MS){
+    playAcc-=PLAY_MS;
+    if(state.idx>=ee){ stopPlay(); return; }
+    state.idx++; moved=true;
+  }
+  if(moved){
+    $('dateSlider').value=state.idx; setFill(); setDateLabel(state.idx);
+    buildFrames();                                // 只重算資料座標，不碰 Plotly
+  }
+  redrawTails();
+  rafId=requestAnimationFrame(playLoop);
+}
 $('playBtn').onclick=()=>{
-  if(playTimer){ stopPlay(); return; }
+  if(playing){ stopPlay(); return; }
   const [s,e]=winRange();
   if(state.idx>=e) state.idx=s;                 // 在終點 → 從起點重播
+  focusName=null;
+  playing=true; playAcc=0; playLast=0;
   $('playBtn').textContent='⏸'; $('playBtn').classList.add('on');
-  const sl=$('dateSlider');
-  playTimer=setInterval(()=>{
-    const [,ee]=winRange();
-    if(state.idx>=ee){ stopPlay(); return; }
-    state.idx++;
-    sl.value=state.idx; setFill(); setDateLabel(state.idx);   // 圓點與填充逐日同步
-    render();
-  },300);
+  try{ Plotly.relayout('chart',{annotations:quadAnnos()}); }catch(e){}  // 標籤交給 canvas
+  rafId=requestAnimationFrame(playLoop);
 };
 
 /* ── 日曆（修正2：年/月快速跳） ─────────── */
@@ -699,6 +891,13 @@ function liveBanner(){
     el.style.color='';
   }
 }
+
+/* ── 驗收探針 ───────────────────────────────
+   只讀不寫，給無頭瀏覽器驗收腳本量測用（v3 尾巴無法用「看截圖」判定對錯，
+   必須能真的去量 canvas 像素與每幀耗時 —— 上一代就是靠看圖說故事白改了三輪）。 */
+window.__frames=()=>frames; window.__focus=()=>focusName; window.__state=()=>state;
+window.__playing=()=>playing; window.__paint=t=>paintTails(t===true); window.__degraded=()=>cvDegraded;
+window.__setDegraded=v=>{cvDegraded=!!v;};        // 驗收用：強制走降級路徑，證明它真的畫得出來
 
 /* ── 啟動 ───────────────────────────────── */
 fetch('history.json').then(r=>r.json()).then(j=>{
