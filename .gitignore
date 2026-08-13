@@ -2,6 +2,8 @@ __pycache__/
 *.pyc
 *.tmp
 .DS_Store
+# feed_kv.py 的衍生產物（每次執行重生，不是資料來源）
+build/
 # 秘密一律不進 repo（鐵律 #3：只進 GitHub Secrets）
 *.token
 *.key

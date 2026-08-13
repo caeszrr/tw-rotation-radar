@@ -22,14 +22,54 @@ export function taipei(now) {
   };
 }
 
+/**
+ * 休市日正規化 → Set<'YYYY-MM-DD'>。
+ *
+ * **2026-08-13 修正**：本函式原本不存在，`inSession()` 直接寫 `hol.dates.includes(ymd)`，
+ * 亦即假設 dates 是字串陣列。但 `scripts/holidays.py` 實際寫出的
+ * `data/holidays.json` 是**物件陣列** `{date,name,desc}` —— `.includes()` 永遠比對不中，
+ * 休市日防護等於不存在。舊單元測試餵的是字串所以全綠，是測試自己造了一個假世界。
+ * 現在一律走這裡正規化，並接受下列所有形狀：
+ *   {dates:[{date:'YYYY-MM-DD',...}]}   ← 官方管線真實輸出
+ *   {dates:['YYYY-MM-DD']}              ← 舊假設，保留相容
+ *   [{date:...}] / ['YYYY-MM-DD']       ← 裸陣列
+ */
+export function holidaySet(hol) {
+  const raw = Array.isArray(hol) ? hol : (hol && Array.isArray(hol.dates) ? hol.dates : []);
+  const out = new Set();
+  for (const r of raw) {
+    if (typeof r === 'string') { if (r) out.add(r.slice(0, 10)); continue; }
+    if (r && typeof r === 'object') { const d = r.date || r.Date || r.日期; if (d) out.add(String(d).slice(0, 10)); }
+  }
+  return out;
+}
+
 /** 盤中視窗：台北交易日 09:00–13:30。休市日曆由 KV 的 holidays 提供（缺就只擋週末）。 */
 export async function inSession(env, now) {
   const { ymd, minutes, dow } = taipei(now);
   if (dow === 0 || dow === 6) return { ok: false, why: '週末' };
   if (minutes < 9 * 60 || minutes > 13 * 60 + 30) return { ok: false, why: `非盤中(台北 ${Math.floor(minutes / 60)}:${String(minutes % 60).padStart(2, '0')})` };
   const hol = await env.QUOTES.get('holidays', { type: 'json' });
-  if (hol && Array.isArray(hol.dates) && hol.dates.includes(ymd)) return { ok: false, why: '休市日' };
+  if (holidaySet(hol).has(ymd)) return { ok: false, why: '休市日' };
   return { ok: true, ymd };
+}
+
+/**
+ * L4 盤中心跳：只有「真的成功寫進 KV」才 ping，否則這條心跳會變成謊報平安。
+ * 未設定 HC_PING_URL_INTRADAY 時優雅跳過並印一行 L2-warn（與 scripts/notify.py 同紀律）。
+ * 設定方式：`npx wrangler secret put HC_PING_URL_INTRADAY`
+ */
+export async function pingIntraday(env, suffix = '') {
+  const url = (env && env.HC_PING_URL_INTRADAY ? String(env.HC_PING_URL_INTRADAY) : '').trim();
+  if (!url) { console.log('L2-warn: HC_PING_URL_INTRADAY 未設定 → 跳過盤中心跳（沉默失敗防護尚未生效）'); return false; }
+  try {
+    await fetch(url.replace(/\/$/, '') + suffix, { method: 'GET' });
+    console.log(`L4 盤中心跳已送出${suffix}`);
+    return true;
+  } catch (e) {
+    console.log(`L4 盤中心跳送出失敗：${e.message}`);
+    return false;
+  }
 }
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -110,6 +150,8 @@ export async function tick(env, now = new Date()) {
     quotes,
   };
   await env.QUOTES.put('latest', JSON.stringify(payload));
+  // 心跳在【put 之後】才發：抓到 0 檔或全批失敗不算成功，否則心跳綠燈但畫面沒資料。
+  await pingIntraday(env, payload.n > 0 ? '' : '/fail');
   return { written: payload.n, ok, fail };
 }
 
