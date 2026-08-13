@@ -10,7 +10,7 @@ crons = ["* * * * *"]
 # KV：只存「原始最新價」JSON。id 由 `wrangler kv namespace create QUOTES` 產生後填入。
 [[kv_namespaces]]
 binding = "QUOTES"
-id = "REPLACE_WITH_KV_ID"
+id = "5be6c03721a1423c9f89670c6cee1b94"
 
 [vars]
 # 盤中視窗（UTC）＝台北 09:00–13:30

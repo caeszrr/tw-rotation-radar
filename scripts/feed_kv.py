@@ -124,8 +124,12 @@ def wrangler_put(key, path):
     ]
     for cmd in variants:
         log("L5-put", " ".join(cmd))
+        # 明指 utf-8：Windows 預設用 cp950 解 wrangler 的輸出會炸 UnicodeDecodeError，
+        # 而那個例外會蓋掉真正的錯誤訊息（2026-08-14 首次實跑踩到，當時 put 其實成功了，
+        # 但畫面上先跳一個看起來很嚴重的 traceback）。
         p = subprocess.run(cmd, cwd=WORKER, shell=(os.name == "nt"),
-                           capture_output=True, text=True)
+                           capture_output=True, text=True,
+                           encoding="utf-8", errors="replace")
         out = (p.stdout or "") + (p.stderr or "")
         if p.returncode == 0:
             log("L5-ok", f"{key} 寫入成功")

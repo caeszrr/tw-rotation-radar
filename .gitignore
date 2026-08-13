@@ -4,6 +4,10 @@ __pycache__/
 .DS_Store
 # feed_kv.py 的衍生產物（每次執行重生，不是資料來源）
 build/
+# wrangler 的本機快取：內含帳號 email 與 Cloudflare account id
+# （2026-08-14 部署時由密鑰掃描當場攔下，差一點就進公開 repo）
+.wrangler/
+worker/.wrangler/
 # 秘密一律不進 repo（鐵律 #3：只進 GitHub Secrets）
 *.token
 *.key

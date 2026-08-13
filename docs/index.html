@@ -233,6 +233,10 @@ footer b{color:var(--dim);font-weight:600}
 
 <script src="plotly.min.js"></script>
 <script src="perfect-freehand.js"></script>
+<!-- 盤中即時層 Worker（Phase 4.5，2026-08-14 部署）。
+     留空或整行刪掉即可關閉即時層：pollLive()/liveBanner() 都會直接 return，
+     頁面退回純收盤定稿，不會有任何網路請求。 -->
+<script>window.RADAR_LIVE_URL='https://tw-rotation-radar-intraday.caeszrr-radar.workers.dev';</script>
 <script>
 const QLAB={LEADING:'領先',IMPROVING:'改善',LAGGING:'落後',WEAKENING:'弱化'};
 const PALETTE=['#ff6b6b','#ffd166','#06d6a0','#4cc9f0','#b388ff','#f78c6b','#8ac926',
