@@ -1010,8 +1010,11 @@ function liveBanner(){
 /* 頁尾即時層說明：文案跟著真實模式走，不是寫死的宣傳詞。 */
 function liveNote(){
   const el=$('liveNote'); if(!el) return;
-  // 收盤後、定稿前：把「什麼時候會更新」的實話寫在這裡（chip 空間不夠寫）。
-  if(afterCloseToday()===true){
+  /* 收盤後、【定稿前】：把「什麼時候會更新」的實話寫在這裡（chip 空間不夠寫）。
+     必須跟 applyClosedChip() 用同一個「今天已定稿了沒」的條件，否則會出現
+     chip 寫「最新收盤定稿」、頁尾同時寫「等排程產生」的自相矛盾 ——
+     2026-08-14 20:16 資料真的落地那一刻當場量到。 */
+  if(afterCloseToday()===true && H && H.dates[plottableRange()[1]]!==tpeNow().ymd){
     el.innerHTML='<br>今日已收盤，收盤定稿由每日排程產生（台北 17:50 觸發、19:30 補跑）。'
       +'<b>GitHub 排程實測會延遲</b>：2026-08-13 那一跑 20:14 才落地，所以請以「大日期變成今天」為準，不要以時鐘為準。';
     return;
