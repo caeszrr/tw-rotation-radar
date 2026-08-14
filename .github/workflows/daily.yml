@@ -99,7 +99,11 @@ jobs:
       # 這一步在「本來就有 Telegram secret」的 Actions 裡補上事後檢查：
       # 交易日卻整天沒資料、或已退回 60 秒模式，都會有人被通知，不必靠有人剛好開網頁看。
       # 純觀測，continue-on-error：盤中層的狀況不該讓日線管線變紅。
+      # `if: always()`：2026-08-14 首夜就踩到 —— 當晚日線管線因 TWSE 端點打不通而失敗，
+      # 本步驟沒有 if: 條件於是被 skipped。**偏偏在出事的日子最需要它跑。**
+      # 盤中層與日線管線是兩條獨立的線，一條倒了不代表另一條也倒，要分開判讀。
       - name: L6 盤中即時層事後檢查
+        if: always()
         continue-on-error: true
         run: python scripts/check_intraday.py
 
