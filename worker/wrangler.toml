@@ -2,15 +2,30 @@ name = "tw-rotation-radar-intraday"
 main = "src/index.js"
 compatibility_date = "2026-01-01"
 
-# 免費層：Cron 最短 1 分鐘。程式內再判斷「台北 09:00–13:30 且為交易日」才實抓，
-# 其餘時間直接 return，不浪費額度。
+# Cron 最短 1 分鐘，所以它只負責「點火」：確認 DO 的鬧鐘鏈還活著。
+# 真正的抓取在 Durable Object 的 alarm 裡，每 10-12 秒一輪（見 src/index.js 開頭）。
+# 盤外直接 return，不發任何對外請求、不碰 DO。
 [triggers]
 crons = ["* * * * *"]
 
-# KV：只存「原始最新價」JSON。id 由 `wrangler kv namespace create QUOTES` 產生後填入。
+# KV：只存「不常變」的東西 —— universe（要抓哪些 ex_ch）與 holidays（休市日曆），
+# 外加一份每分鐘一次的 latest 保底副本（DO 讀不到時 /latest 還有東西可端）。
+# 熱報價【不】走 KV：免費層寫入上限 1,000 次/日，10 秒級需要 1,355 次/日，必爆。
 [[kv_namespaces]]
 binding = "QUOTES"
 id = "5be6c03721a1423c9f89670c6cee1b94"
+
+# Durable Object：熱報價的唯一真相。
+# 選它而不選 caches.default 的理由：Cache API 不跨機房共享，而 cron/alarm 落在哪個
+# 機房不保證等於使用者請求落地的機房 —— 寫得進去、讀不出來，而且不會報錯。
+[[durable_objects.bindings]]
+name = "LATEST"
+class_name = "Latest"
+
+# 免費層必須用 new_sqlite_classes（new_classes 需付費方案）。
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["Latest"]
 
 [vars]
 # 盤中視窗（UTC）＝台北 09:00–13:30

@@ -95,6 +95,14 @@ jobs:
             echo "published=true" >> "$GITHUB_OUTPUT"
           fi
 
+      # 盤中即時層的告警需要 Cloudflare Worker 上的 secret，而那兩個目前都沒設。
+      # 這一步在「本來就有 Telegram secret」的 Actions 裡補上事後檢查：
+      # 交易日卻整天沒資料、或已退回 60 秒模式，都會有人被通知，不必靠有人剛好開網頁看。
+      # 純觀測，continue-on-error：盤中層的狀況不該讓日線管線變紅。
+      - name: L6 盤中即時層事後檢查
+        continue-on-error: true
+        run: python scripts/check_intraday.py
+
       - name: L4 成功心跳（最後一步；沒有 ping 就是事故）
         if: success()
         run: python scripts/notify.py ping daily

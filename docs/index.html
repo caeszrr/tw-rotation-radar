@@ -225,7 +225,7 @@ footer b{color:var(--dim);font-weight:600}
     <b>本頁僅呈現市場公開資料之計算結果，非投資建議。</b><br>
     已知近似：還原價僅處理<b>現金股利</b>，股票股利與減資未還原；
     市值權重採當期發行股數快照，歷史增減資未還原。<br>
-    <span id="footMeta"></span>
+    <span id="footMeta"></span><span id="liveNote"></span>
   </footer>
 </div>
 
@@ -250,8 +250,11 @@ let vis={industry:null,size:null};          // 族群顯示狀態
    資料來自 Cloudflare Worker 寫入 KV 的「原始最新價」；本頁自己算今日暫定 RS。
    鐵則：暫定值只存在於畫面，永不寫回 history.json。                        */
 const LIVE_URL = (window.RADAR_LIVE_URL || '');   // 部署後填入 Worker 網址
-const LIVE_MS = 60000, LIVE_STALE_MS = 5*60000;
-let live = {data:null, at:0, timer:null};
+/* 輪詢節奏（工單 B3）：盤中且分頁可見 → 10 秒；背景分頁或盤外 → 60 秒。
+   Worker 端每 10-12 秒寫一輪新報價，所以 10 秒是「剛好接得住」，不是空轉。
+   背景分頁降回 60 秒：使用者根本沒在看，沒有理由多打 5 倍請求。 */
+const LIVE_MS_FAST = 10000, LIVE_MS_SLOW = 60000;
+let live = {data:null, at:0, timer:null, ms:0, today:null};
 let colorOf={industry:{},size:{}};          // 穩定配色（不隨隱藏而位移）
 let state={group:'industry',win:60,weight:'equal',bench:'taiex',tail:5,idx:0,winStart:null};
 
@@ -546,9 +549,12 @@ function labelAnnos(){
   const shown = focusName==null ? heads : heads.filter(hd=>hd.n===focusName);
   const out=shown.map(hd=>({x:hd.x,y:(focusName==null?hd.ly:hd.y),xref:'x',yref:'y',text:hd.n,showarrow:false,
     font:{size:11,color:hd.col},xanchor:'left',xshift:9,bgcolor:'rgba(13,17,23,.62)',borderpad:2}));
+  // 圖例（工單 A）：盤中時大日期寫「今天」，但實體尾巴畫的是前一交易日的收盤。
+  // 這兩件事必須在同一個畫面上被明講，否則就是換一種方式誤導。
   if(frames.some(f=>f.live))
-    out.push({x:AX_MAX-0.2,y:AX_MIN+0.9,xref:'x',yref:'y',text:'○ 空心點＝盤中暫定，未收盤',
-      showarrow:false,font:{size:10,color:'#8b98a5'},xanchor:'right'});
+    out.push({x:AX_MAX-0.2,y:AX_MIN+1.4,xref:'x',yref:'y',
+      text:'實體尾巴＝前一交易日收盤定稿<br>○ 空心點＝今日盤中暫定，未收盤',
+      showarrow:false,font:{size:10,color:'#8b98a5'},xanchor:'right',align:'right'});
   return out;
 }
 /** 只有聚焦狀態改變時走這條：資料沒動，不必重跑 Plotly.react，
@@ -679,10 +685,21 @@ function setFill(){
   const pct = b>a ? ((v-a)/(b-a))*100 : 0;
   sl.style.setProperty('--pct', pct.toFixed(2)+'%');
 }
+const WD=['日','一','二','三','四','五','六'];
+const wdOf=d=>WD[new Date(d+'T00:00:00+08:00').getDay()];
 function setDateLabel(i){
   const d=H.dates[i];
-  const wd=['日','一','二','三','四','五','六'][new Date(d+'T00:00:00+08:00').getDay()];
-  $('bigDate').innerHTML=d+'<span class="wd">週'+wd+'</span>';
+  /* 盤中（工單 A 第 1 態）：大日期說「今天」。
+     理由：畫面上真正在動的是今天的暫定點，而舊版大日期印的是前一交易日，
+     使用者會以為自己在看那一天的收盤 —— Caesar 今天就是這樣被誤導的。
+     實體尾巴仍然是前一交易日的收盤定稿，這件事由圖例明寫出來（labelAnnos）。
+     只在游標停在最新一格時覆寫；往回拉滑桿看歷史，大日期照樣是那一天。 */
+  if(LIVE_URL&&i===plottableRange()[1]&&isIntraday()){
+    const t=tpeNow().ymd;
+    $('bigDate').innerHTML=t+'<span class="wd">('+wdOf(t)+')盤中</span>';
+    return;
+  }
+  $('bigDate').innerHTML=d+'<span class="wd">週'+wdOf(d)+'</span>';
 }
 /** 完整同步（會重設 min/max）—— 只在非拖曳時呼叫 */
 function syncDate(){
@@ -844,10 +861,33 @@ $('tailRange').oninput=e=>{state.tail=+e.target.value;$('tailVal').textContent=s
 $('ctoggle').onclick=()=>$('cbody').classList.toggle('open');
 
 /* ── 盤中即時層 ─────────────────────────── */
-function tpeNow(d=new Date()){const t=new Date(d.getTime()+8*3600e3);
+/* 時鐘。NOW_OVERRIDE 只給驗收腳本用（三態日期標示沒辦法在「現在這一刻」以外
+   用眼睛驗，所以必須能把時鐘搬到盤中／收盤後／週末去看畫面說什麼）。
+   正式使用時永遠是 null，不影響任何行為。 */
+let NOW_OVERRIDE=null;
+const nowMs=()=>NOW_OVERRIDE==null?Date.now():NOW_OVERRIDE;
+function tpeNow(d=null){const t=new Date((d?d.getTime():nowMs())+8*3600e3);
   return {ymd:t.toISOString().slice(0,10),min:t.getUTCHours()*60+t.getUTCMinutes(),dow:t.getUTCDay()};}
 function isIntraday(){const n=tpeNow();
   return n.dow!==0&&n.dow!==6&&n.min>=540&&n.min<=810;}
+/* 今天「已經收盤、但收盤資料還沒定稿」嗎？（工單 A 第 2 態）
+   回傳 true / false / null(不敢說)。三個字面上都不會說謊：
+     true  = 有證據today是交易日且已過 13:30
+     false = 週末、休市日，或還沒到收盤
+     null  = 平日、已過 13:30，但拿不到證據（Worker 連不上）→ 走保守文案
+   為什麼要證據：前端手上沒有休市日曆。硬用「平日=有開市」會在國定假日
+   說出「08-14 已收盤」這種假話 —— 而假話正是這次要修的東西本身。
+   證據來源刻意不新增第二份日曆檔（兩份日曆＝兩個真相，本專案已被咬過兩次）：
+     1) Worker /health 的 today.trading（它讀的是 KV 裡那份唯一的日曆）
+     2) Worker 今天真的抓到過報價（live.data.tpe===今天）→ 今天必然有開市 */
+function afterCloseToday(){
+  const n=tpeNow();
+  if(n.dow===0||n.dow===6) return false;
+  if(n.min<=810) return false;
+  if(live.today&&live.today.ymd===n.ymd) return !!live.today.trading;
+  if(live.data&&live.data.tpe===n.ymd) return true;
+  return null;
+}
 /** 用暫定價把「今日」的族群指數往前推一格，算出暫定 RS-Ratio / RS-Momentum */
 function liveTentative(){
   if(!live.data||!live.data.quotes) return null;
@@ -877,9 +917,46 @@ async function pollLive(){
   try{
     const r=await fetch(LIVE_URL.replace(/\/$/,'')+'/latest',{cache:'no-store'});
     const j=await r.json();
-    if(j&&j.quotes){ live.data=j; live.at=Date.parse(j.ts)||Date.now(); }
+    if(j&&j.quotes){ live.data=j; live.at=Date.parse(j.ts)||nowMs(); }
   }catch(e){ /* 靜默：由 staleness 判斷顯示離線 */ }
-  render();
+  render(); liveNote();
+}
+/* 只問「今天是不是交易日」，不拿報價（回應很小）。
+   前端沒有休市日曆，這是唯一不必再複製一份日曆檔的取得方式。 */
+async function pollHealth(){
+  if(!LIVE_URL) return;
+  try{
+    const r=await fetch(LIVE_URL.replace(/\/$/,'')+'/health',{cache:'no-store'});
+    const j=await r.json();
+    if(j&&j.today) live.today=j.today;
+  }catch(e){ /* 拿不到就維持 null，afterCloseToday() 會走保守文案 */ }
+}
+/* ── 輪詢節奏（工單 B3）────────────────────────
+   盤中且分頁可見 → 10 秒；背景分頁 → 60 秒；盤外 → 不打網路。
+   每次跑完都重算一次間隔，所以跨過 09:00 / 13:30 或切換分頁時會自動換檔，
+   不需要另外掛一堆監聽器。另外用一個 30 秒的純本機計時器刷新日期與 chip
+   （不發任何請求）—— 三態必須會自己跟著時鐘走，而不是重整才對。 */
+function desiredMs(){
+  if(!LIVE_URL||!isIntraday()) return 0;
+  return document.visibilityState==='hidden'?LIVE_MS_SLOW:LIVE_MS_FAST;
+}
+function schedulePoll(){
+  const ms=desiredMs();
+  if(ms===live.ms) return;
+  if(live.timer){ clearInterval(live.timer); live.timer=null; }
+  live.ms=ms;
+  if(ms>0) live.timer=setInterval(()=>{ pollLive().then(schedulePoll); },ms);
+}
+/* 純本機刷新：只更新頁首日期／chip／頁尾文案，不重跑 Plotly。
+   只有在「會不會出現空心點」這件事真的改變時才做一次完整 render()。 */
+let chromeKey='';
+function refreshChrome(){
+  if(!H) return;
+  const hi=plottableRange()[1];
+  const k=[isIntraday(),state.idx===hi,!!(live.data&&live.data.mode==='slow')].join('|');
+  if(k!==chromeKey){ chromeKey=k; render(); }
+  setDateLabel(state.idx); applyClosedChip(hi); liveBanner(); liveNote();
+  schedulePoll();
 }
 /* ── 收盤狀態 chip（含資料落後提示）───────────────────
    2026-08-14 新增。起因：有人看到的是「最新收盤定稿」四個字，卻不知道那是
@@ -890,33 +967,72 @@ async function pollLive(){
 function applyClosedChip(hi){
   const el=$('liveChip');
   if(state.idx!==hi){ el.textContent='歷史定稿'; el.style.color=''; return; }
-  const d=H.dates[hi];
-  const age=Math.floor((Date.now()-Date.parse(d+'T13:30:00+08:00'))/86400000);
-  if(age>4){ el.textContent='最新收盤 '+d.slice(5)+'（'+age+' 天前）'; el.style.color='#d8a657'; }
-  else{ el.textContent='最新收盤定稿'; el.style.color=''; }
+  const d=H.dates[hi], n=tpeNow();
+  // 今天的收盤已經進 history.json → 第 3 態，就是它
+  if(d===n.ymd){ el.textContent='最新收盤定稿'; el.style.color=''; return; }
+  // 資料落後永遠先講（比「今天收盤了」更嚴重的事實，不可以被後面的文案蓋掉）
+  const age=Math.floor((nowMs()-Date.parse(d+'T13:30:00+08:00'))/86400000);
+  if(age>4){ el.textContent='最新收盤 '+d.slice(5)+'（'+age+' 天前）'; el.style.color='#d8a657'; return; }
+  const ac=afterCloseToday();
+  // 第 2 態：今天已收盤、尚未定稿（17:50 主跑 / 19:30 補跑，約 18:00 後會更新）
+  if(ac===true){ el.textContent=n.ymd.slice(5)+' 已收盤，定稿約 18:00 後更新'; el.style.color='#d8a657'; return; }
+  // 平日收盤後但拿不到「今天是不是交易日」的證據 → 只說查得到的事實
+  if(ac===null){ el.textContent='最新收盤 '+d.slice(5)+' · 今日尚未更新'; el.style.color='#d8a657'; return; }
+  el.textContent='最新收盤定稿'; el.style.color='';
 }
 function liveBanner(){
   const el=$('liveChip');
   if(!LIVE_URL){ return; }
-  // 非盤中就交還給 applyClosedChip()，不要用「最新收盤定稿」蓋掉資料落後提示
-  if(!isIntraday()){ applyClosedChip(plottableRange()[1]); return; }
-  const age=Date.now()-live.at;
-  if(!live.data||age>LIVE_STALE_MS){
-    const t=live.at?new Date(live.at+8*3600e3).toISOString().slice(11,16):'--:--';
+  const hi=plottableRange()[1];
+  // 非盤中就交還給 applyClosedChip()，不要用「最新收盤定稿」蓋掉資料落後提示。
+  // 游標拉回歷史日期時也一樣：畫面上是那一天的定稿，chip 不可以還在喊「盤中暫定」
+  //（2026-08-14 驗收腳本抓到的：舊版 liveBanner 完全不看游標位置）。
+  if(!isIntraday()||state.idx!==hi){ applyClosedChip(hi); return; }
+  const slow=!!(live.data&&live.data.mode==='slow');
+  // 判離線的門檻跟著模式走：10 秒級時 2 分鐘沒新資料就是不對勁，
+  // 退回 60 秒模式時放寬到 5 分鐘，否則會一直誤報離線。
+  const staleMs=slow?5*60000:120000;
+  const age=nowMs()-live.at;
+  if(!live.data||age>staleMs){
+    const t=live.at?new Date(live.at+8*3600e3).toISOString().slice(11,19):'--:--:--';
     el.textContent='即時層離線，以下為 '+t+' 資料';
     el.style.color='#d8a657';
   }else{
-    el.textContent='盤中暫定 · '+new Date(live.at+8*3600e3).toISOString().slice(11,16);
-    el.style.color='';
+    // 秒數是刻意的：10 秒級之下只印到分會看起來像凍住，使用者無從分辨「在動」與「壞了」。
+    el.textContent='盤中暫定 · '+new Date(live.at+8*3600e3).toISOString().slice(11,19)+(slow?'（60 秒模式）':'');
+    el.style.color=slow?'#d8a657':'';
   }
+}
+/* 頁尾即時層說明：文案跟著真實模式走，不是寫死的宣傳詞。 */
+function liveNote(){
+  const el=$('liveNote'); if(!el) return;
+  if(!LIVE_URL){ el.textContent=''; return; }
+  const slow=!!(live.data&&live.data.mode==='slow');
+  el.innerHTML='<br>'+(slow
+    ? '盤中已退回 <b>60 秒模式</b>（快速模式自動降級，原因見告警訊息）；13:30 後凍結，約 18:00 收盤定稿覆蓋。'
+    // 「約 13 秒」是 2026-08-14 演練實測值（5 輪，輪距 12.6-14.7 秒），不是估的。
+    // 工單原本寫「約 10 秒」，但批距 5 秒 × 3 批的物理下限就是 10 秒再加上網路與寫入，
+    // 印 10 秒會是另一種形式的誇大 —— 這次要修的就是這類事。
+    : '盤中約 <b>13 秒</b>更新（來源為證交所約 5 秒快照）；13:30 後凍結，約 18:00 收盤定稿覆蓋。');
 }
 
 /* ── 驗收探針 ───────────────────────────────
    只讀不寫，給無頭瀏覽器驗收腳本量測用（v3 尾巴無法用「看截圖」判定對錯，
    必須能真的去量 canvas 像素與每幀耗時 —— 上一代就是靠看圖說故事白改了三輪）。 */
-window.__frames=()=>frames; window.__focus=()=>focusName; window.__state=()=>state;
+window.__frames=()=>frames; window.__focus=()=>focusName; window.__state=()=>state; window.__H=()=>H;
 window.__playing=()=>playing; window.__paint=t=>paintTails(t===true); window.__degraded=()=>cvDegraded;
 window.__setDegraded=v=>{cvDegraded=!!v;};        // 驗收用：強制走降級路徑，證明它真的畫得出來
+/* 三態日期標示的驗收鉤子（工單 A）。
+   __setNow 把時鐘搬到指定時刻並重繪；__setLive 灌一包假的即時資料／交易日答案。
+   沒有這兩個，三態只能等到真的那個時刻才驗得到 —— 而那正是「看圖說故事」，
+   本專案已經因此白改過三輪版面。 */
+window.__setNow=v=>{NOW_OVERRIDE=(v==null?null:+v); chromeKey='@'; refreshChrome();};
+window.__goLatest=()=>{state.idx=plottableRange()[1]; syncDate(); render();};   // 把游標拉回最新一格
+window.__setLive=(d,today)=>{ if(d!==undefined){live.data=d; live.at=d?(Date.parse(d.ts)||nowMs()):0;}
+  if(today!==undefined) live.today=today; chromeKey='@'; refreshChrome(); };
+window.__chip=()=>({date:$('bigDate').textContent,chip:$('liveChip').textContent,
+  note:$('liveNote').textContent,intraday:isIntraday(),afterClose:afterCloseToday(),pollMs:live.ms,
+  legend:(($('chart').layout&&$('chart').layout.annotations)||[]).map(a=>a.text).filter(t=>/尾巴|空心/.test(t)).join('')});
 
 /* ── 啟動 ───────────────────────────────── */
 /* cache:'no-cache' = 每次都先向伺服器驗證新舊，沒變才用快取（回 304，不重下 5MB）。
@@ -934,8 +1050,17 @@ fetch('history.json',{cache:'no-cache'}).then(r=>r.json()).then(j=>{
   $('specNote').textContent=' '+H.meta.spec+'　n=14 k=10　成分版本 '+H.meta.sectors_version;
   $('footMeta').textContent='計算時間 '+H.meta.generated_at+'　·　基準基礎：'+H.meta.benchmark_basis
     +'　·　族群指數起算日不早於 '+H.meta.index_start_floor+'　·　'+H.dates.length+' 個交易日';
-  buildControls(); render();
-  if(LIVE_URL){ pollLive(); live.timer=setInterval(pollLive,LIVE_MS); }
+  buildControls(); render(); liveNote();
+  if(LIVE_URL){
+    pollHealth().then(refreshChrome);          // 先問「今天是不是交易日」，chip 才說得出實話
+    if(isIntraday()) pollLive();
+    schedulePoll();
+    setInterval(refreshChrome,30000);          // 純本機，不發請求
+    document.addEventListener('visibilitychange',()=>{
+      schedulePoll();
+      if(document.visibilityState==='visible'){ refreshChrome(); if(isIntraday()) pollLive(); }
+    });
+  }
 }).catch(e=>{$('chart').innerHTML='<div class="loading">history.json 載入失敗：'+e.message+'</div>';});
 </script>
 </body>

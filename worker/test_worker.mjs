@@ -5,7 +5,8 @@
 // 物件陣列 [{date,name,desc}] —— 測試因此在一個假世界裡全綠，而真實上線會失效。
 // 現在直接讀 ../data/holidays.json 本尊進來測，並加一條迴歸鎖證明舊寫法必敗。
 import { readFileSync } from 'node:fs';
-import { taipei, inSession, priceOf, holidaySet, pingIntraday } from './src/index.js';
+import { taipei, inSession, priceOf, holidaySet, pingIntraday,
+         isTradingDay, nextMode, nextGap, oneRound, throttle, alertDegrade, FAST } from './src/index.js';
 
 const P = [], F = [];
 const ck = (n, c, d = '') => { (c ? P : F).push(n); console.log((c ? '  [PASS] ' : '  [FAIL] ') + n + (d ? '  ' + d : '')); };
@@ -90,6 +91,103 @@ try {
   ck('ping 本身失敗 → 吞掉、回 false、不拖垮 tick', r5 === false);
 } finally {
   globalThis.fetch = realFetch;
+}
+
+// ══ 2026-08-14 快速模式（DO + alarm）新增護欄 ═══════════════════════════
+
+console.log('\n=== 交易日判斷（前端「已收盤、未定稿」狀態靠它）===');
+{
+  const e2 = envWith(REAL);
+  const sat = await isTradingDay(e2, at('2026-08-15T04:00:00Z'));   // 週六
+  ck('週六 → 非交易日', sat.trading === false && sat.why === '週末', JSON.stringify(sat));
+  const may1 = await isTradingDay(e2, at('2026-05-01T04:00:00Z'));  // 勞動節(週五)
+  ck('勞動節(週五) → 非交易日', may1.trading === false && may1.why === '休市日', JSON.stringify(may1));
+  const fri = await isTradingDay(e2, at('2026-08-14T04:00:00Z'));
+  ck('一般週五 → 交易日', fri.trading === true, JSON.stringify(fri));
+  // 關鍵：與時間無關。收盤後 16:43 問它，答案必須還是「今天是交易日」，
+  // 否則前端就分不出「今天收盤了但還沒定稿」與「今天根本沒開市」。
+  const late = await isTradingDay(e2, at('2026-08-14T08:43:00Z'));  // 台北 16:43
+  ck('收盤後(台北 16:43) 問 → 仍答交易日（不看時間，只看日曆）', late.trading === true, JSON.stringify(late));
+  ck('isTradingDay 與 inSession 不同：同一時刻 inSession 為 false',
+    (await inSession(e2, at('2026-08-14T08:43:00Z'))).ok === false);
+}
+
+console.log('\n=== 模式狀態機（退回 60 秒模式的條件）===');
+ck('fast + 有抓到 → 維持 fast、strikes 歸零',
+  JSON.stringify(nextMode({ mode: 'fast', strikes: 2, tpe: '2026-08-14' }, 231, '2026-08-14')) ===
+  JSON.stringify({ mode: 'fast', strikes: 0, event: null, reason: '' }));
+{
+  let m = { mode: 'fast', strikes: 0, tpe: '2026-08-14' };
+  const seq = [];
+  for (let i = 0; i < 3; i++) { const r = nextMode(m, 0, '2026-08-14'); seq.push(r.mode); m = { ...m, ...r }; }
+  ck(`連續 ${FAST.STRIKES_TO_DEGRADE} 輪抓到 0 檔才退回（不是一抖就退）`,
+    seq.join(',') === 'fast,fast,slow', seq.join(','));
+  ck('退回那一次帶 degrade 事件（會觸發告警）',
+    nextMode({ mode: 'fast', strikes: 2, tpe: '2026-08-14' }, 0, '2026-08-14').event === 'degrade');
+}
+ck('slow + 同一天 → 不自己跳回 fast（避免來回震盪）',
+  nextMode({ mode: 'slow', strikes: 3, tpe: '2026-08-14' }, 231, '2026-08-14').mode === 'slow');
+{
+  const r = nextMode({ mode: 'slow', strikes: 3, tpe: '2026-08-13' }, 231, '2026-08-14');
+  ck('slow + 換到新交易日 → 自動重試 fast（不會永久釘在慢速）', r.mode === 'fast' && r.event === 'retry', JSON.stringify(r));
+}
+
+console.log('\n=== 輪距計算 ===');
+ck('fast：一輪 10.5 秒 → 1.5 秒後再來（≈12 秒輪距）', nextGap('fast', 10500) === 1500, String(nextGap('fast', 10500)));
+ck('fast：一輪異常快(1 秒) → 仍等 11 秒，不打爆 MIS', nextGap('fast', 1000) === 11000, String(nextGap('fast', 1000)));
+ck('fast：一輪拖到 30 秒 → 至少隔 MIN_GAP_MS 才再來', nextGap('fast', 30000) === FAST.MIN_GAP_MS);
+ck('slow：退回模式輪距 ≈60 秒', nextGap('slow', 10000) === 50000, String(nextGap('slow', 10000)));
+
+console.log('\n=== 一輪的分批與批距 ===');
+{
+  const realFetch2 = globalThis.fetch;
+  const urls = [], t0 = Date.now();
+  globalThis.fetch = async (u) => {
+    urls.push(String(u));
+    const q = decodeURIComponent(String(u).split('ex_ch=')[1].split('&')[0]).split('|');
+    return { ok: true, json: async () => ({ msgArray: q.map((ch, i) => ({
+      ch: ch.replace(/^(tse|otc)_/, ''), c: ch.replace(/^(tse|otc)_/, '').replace('.tw', ''),
+      b: '10.0000_', a: '10.2000_', z: '-', y: '9.9000' })) }) };
+  };
+  try {
+    const chs = Array.from({ length: 231 }, (_, i) => `tse_${1000 + i}.tw`);
+    const r = await oneRound(chs, throttle(), { gapMs: 0 });          // gapMs=0：只測分批，不等
+    ck('231 檔 → 3 批（每批 ≤100）', r.batches === 3 && urls.length === 3, `batches=${r.batches}`);
+    ck('每批不超過 100 檔', urls.every(u => decodeURIComponent(u.split('ex_ch=')[1].split('&')[0]).split('|').length <= 100));
+    ck('231 檔全部有報價', Object.keys(r.quotes).length === 231, String(Object.keys(r.quotes).length));
+    ck('取的是買賣中價 (10.0+10.2)/2', r.quotes['1000'].p === 10.1, JSON.stringify(r.quotes['1000']));
+
+    urls.length = 0;
+    const t1 = Date.now();
+    await oneRound(chs.slice(0, 300), throttle(), { gapMs: 300 });    // 3 批、批距 300ms
+    const el = Date.now() - t1;
+    // 最後一批之後【不】再等 —— 若多等一次，這裡會是 ~900ms 而不是 ~600ms
+    ck('批距生效且最後一批後不空等（3 批 × 300ms 應約 600ms）', el >= 550 && el < 850, `elapsed=${el}ms`);
+
+    urls.length = 0;
+    globalThis.fetch = async () => { throw new Error('MIS down'); };
+    const rf = await oneRound(chs, throttle(), { gapMs: 0 });
+    ck('MIS 全掛 → 回 0 檔、3 批失敗，不拋例外', Object.keys(rf.quotes).length === 0 && rf.fail === 3, JSON.stringify({ n: 0, fail: rf.fail }));
+  } finally { globalThis.fetch = realFetch2; }
+}
+
+console.log('\n=== 退回模式告警（絕不靜默）===');
+{
+  const realFetch3 = globalThis.fetch;
+  let hits = [];
+  globalThis.fetch = async (u, o) => { hits.push(String(u)); return { ok: true }; };
+  try {
+    hits = [];
+    const r1 = await alertDegrade({ HC_PING_URL_INTRADAY: 'https://hc-ping.com/abc' }, '測試');
+    ck('無 Telegram secret → 仍打 Healthchecks /fail，且回 false（不謊稱已通知）',
+      r1 === false && hits.length === 1 && hits[0].endsWith('/fail'), JSON.stringify(hits));
+    hits = [];
+    const r2 = await alertDegrade({ HC_PING_URL_INTRADAY: 'https://hc-ping.com/abc', TELEGRAM_BOT_TOKEN: 'x', TELEGRAM_CHAT_ID: '1' }, '測試');
+    ck('有 Telegram secret → Healthchecks 與 Telegram 各打一次', r2 === true && hits.length === 2 && /api\.telegram\.org/.test(hits[1]), JSON.stringify(hits));
+    hits = [];
+    const r3 = await alertDegrade({}, '測試');
+    ck('兩者都沒設 → 不當機、回 false（畫面標示仍是第三條路）', r3 === false && hits.length === 0);
+  } finally { globalThis.fetch = realFetch3; }
 }
 
 console.log(`\n=== ${P.length} passed, ${F.length} failed ===`);
