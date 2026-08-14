@@ -62,6 +62,10 @@ LITERAL_SOURCES = [
     ("HC_PING_URL_DAILY", "env"), ("HC_PING_URL_INTRADAY", "env"),
     ("ANTHROPIC_API_KEY", "env"), ("GEMINI_API_KEY", "env"), ("FUGLE_API_KEY", "env"),
     (".finmind_token", "file"), (".gemini_key", "file"),
+    # 主專案（相鄰目錄）也放了同一批密鑰檔。2026-08-14 發現：只掃公開 repo 根目錄
+    # 會漏掉 FinMind token —— 掃描名單漏一項，就等於對那一項毫無防護。
+    (os.path.join(os.path.dirname(ROOT), "taiwan-stock-app", ".finmind_token"), "file_abs"),
+    (os.path.join(os.path.dirname(ROOT), "taiwan-stock-app", ".gemini_key"), "file_abs"),
     # Cloudflare wrangler 的本機快取：OAuth token / refresh token / account id / email
     (os.path.join("worker", ".wrangler", "cache", "wrangler-account.json"), "json"),
     (os.path.join(os.path.expanduser("~"), ".wrangler", "config", "default.toml"), "raw"),
@@ -79,8 +83,8 @@ def literals(extra):
                 v = os.environ.get(name, "").strip()
                 if v:
                     out.add(v)
-            elif kind == "file":
-                p = os.path.join(ROOT, name)
+            elif kind in ("file", "file_abs"):
+                p = name if kind == "file_abs" else os.path.join(ROOT, name)
                 if os.path.exists(p):
                     out.add(open(p, encoding="utf-8").read().strip())
             else:

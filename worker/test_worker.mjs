@@ -6,7 +6,8 @@
 // 現在直接讀 ../data/holidays.json 本尊進來測，並加一條迴歸鎖證明舊寫法必敗。
 import { readFileSync } from 'node:fs';
 import { taipei, inSession, priceOf, holidaySet, pingIntraday,
-         isTradingDay, nextMode, nextGap, oneRound, throttle, alertDegrade, FAST } from './src/index.js';
+         isTradingDay, nextMode, nextGap, nextBatchGap, oneRound, throttle,
+         alertDegrade, alertWiden, FAST } from './src/index.js';
 
 const P = [], F = [];
 const ck = (n, c, d = '') => { (c ? P : F).push(n); console.log((c ? '  [PASS] ' : '  [FAIL] ') + n + (d ? '  ' + d : '')); };
@@ -133,10 +134,41 @@ ck('slow + 同一天 → 不自己跳回 fast（避免來回震盪）',
 }
 
 console.log('\n=== 輪距計算 ===');
-ck('fast：一輪 10.5 秒 → 1.5 秒後再來（≈12 秒輪距）', nextGap('fast', 10500) === 1500, String(nextGap('fast', 10500)));
-ck('fast：一輪異常快(1 秒) → 仍等 11 秒，不打爆 MIS', nextGap('fast', 1000) === 11000, String(nextGap('fast', 1000)));
+ck('fast：一輪 8.5 秒 → 1.5 秒後再來（≈10 秒輪距）', nextGap('fast', 8500) === 1500, String(nextGap('fast', 8500)));
+ck('fast：一輪異常快(1 秒) → 仍等 9 秒，不打爆 MIS', nextGap('fast', 1000) === 9000, String(nextGap('fast', 1000)));
 ck('fast：一輪拖到 30 秒 → 至少隔 MIN_GAP_MS 才再來', nextGap('fast', 30000) === FAST.MIN_GAP_MS);
 ck('slow：退回模式輪距 ≈60 秒', nextGap('slow', 10000) === 50000, String(nextGap('slow', 10000)));
+
+console.log('\n=== 批距 4 秒與自動放寬護欄（決策 #28 / R2）===');
+// 對證交所端點的自我約束：3 批排在 t=0/4/8 秒 → 任何 5 秒視窗最多 2 個請求
+ck('批距 4 秒仍守「每 5 秒 ≤3 請求」（實測窗內最多 2 個）', (() => {
+  const starts = [0, FAST.BATCH_GAP_MS, FAST.BATCH_GAP_MS * 2];
+  const worst = Math.max(...starts.map(s => starts.filter(t => t >= s && t < s + 5000).length));
+  return FAST.BATCH_GAP_MS === 4000 && worst <= 2;
+})(), `批起點=[0,${FAST.BATCH_GAP_MS},${FAST.BATCH_GAP_MS * 2}]ms`);
+ck('乾淨一輪 → 維持 4 秒批距、連敗歸零',
+  JSON.stringify(nextBatchGap({ gapMs: 4000, failStreak: 1, tpe: '2026-08-17' }, false, '2026-08-17')) ===
+  JSON.stringify({ gapMs: 4000, failStreak: 0, event: null, reason: '' }));
+{
+  let m = { gapMs: 4000, failStreak: 0, tpe: '2026-08-17' }, seq = [];
+  for (let i = 0; i < 2; i++) { const r = nextBatchGap(m, true, '2026-08-17'); seq.push(r.gapMs); m = { ...m, ...r }; }
+  ck(`連續 ${FAST.BATCH_FAIL_ROUNDS_TO_WIDEN} 輪有批次失敗 → 退回 5 秒批距`, seq.join(',') === '4000,5000', seq.join(','));
+  ck('退回那一次帶 widen 事件（會觸發告警）',
+    nextBatchGap({ gapMs: 4000, failStreak: 1, tpe: '2026-08-17' }, true, '2026-08-17').event === 'widen');
+}
+ck('中間有一輪乾淨 → 連敗歸零，不會累積成退回', (() => {
+  let m = { gapMs: 4000, failStreak: 0, tpe: '2026-08-17' };
+  for (const fail of [true, false, true]) m = { ...m, ...nextBatchGap(m, fail, '2026-08-17') };
+  return m.gapMs === 4000;
+})(), '失敗,乾淨,失敗 → 仍是 4000');
+ck('已退回 5 秒 + 同一天 → 不自己跳回 4 秒',
+  nextBatchGap({ gapMs: 5000, failStreak: 2, tpe: '2026-08-17' }, false, '2026-08-17').gapMs === 5000);
+{
+  const r = nextBatchGap({ gapMs: 5000, failStreak: 2, tpe: '2026-08-17' }, false, '2026-08-18');
+  ck('已退回 5 秒 + 換新交易日 → 自動重試 4 秒', r.gapMs === 4000 && r.event === 'retry', JSON.stringify(r));
+}
+ck('批次失敗但仍抓到資料 → 只放寬批距，【不】降到 60 秒模式（兩層護欄互不干擾）',
+  nextMode({ mode: 'fast', strikes: 0, tpe: '2026-08-17' }, 231, '2026-08-17').mode === 'fast');
 
 console.log('\n=== 一輪的分批與批距 ===');
 {
@@ -187,6 +219,9 @@ console.log('\n=== 退回模式告警（絕不靜默）===');
     hits = [];
     const r3 = await alertDegrade({}, '測試');
     ck('兩者都沒設 → 不當機、回 false（畫面標示仍是第三條路）', r3 === false && hits.length === 0);
+    hits = [];
+    const r4 = await alertWiden({ HC_PING_URL_INTRADAY: 'https://hc-ping.com/abc', TELEGRAM_BOT_TOKEN: 'x', TELEGRAM_CHAT_ID: '1' }, '連續 2 輪有批次失敗');
+    ck('批距放寬也會告警（走同一條路，不是靜默調參）', r4 === true && hits.length === 2, JSON.stringify(hits));
   } finally { globalThis.fetch = realFetch3; }
 }
 

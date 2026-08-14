@@ -37,6 +37,11 @@ _SIM = os.environ.get("RADAR_SIMULATE_DATE", "").strip()
 RUN_ID = _SIM or datetime.now(TPE).strftime("%Y-%m-%d")
 HOLIDAYS = os.path.join(ROOT, "data", "holidays.json")
 
+# Phase 6 素材（決策 #27 條件④，2026-08-14 實測，本輪【不動排程】）：
+# 整批端點 STOCK_DAY_ALL 收盤後落後 14-16 小時（20:15 仍是前一交易日），
+# 但**逐檔月表** https://www.twse.com.tw/exchangeReport/STOCK_DAY?date=YYYYMM01&stockNo=CODE
+# 當天 20:15 就已經有當日資料（scripts/verify_finmind_alignment.py 實際拿它比對成功）。
+# 代價是 229 次逐檔呼叫 vs 1 次整批。燒機 5 日量完更新時點後，一併納入決策 #23 的排程重議。
 U_TWSE = "https://openapi.twse.com.tw/v1/exchangeReport/STOCK_DAY_ALL"
 U_TPEX = "https://www.tpex.org.tw/openapi/v1/tpex_mainboard_daily_close_quotes"
 U_MI = "https://openapi.twse.com.tw/v1/indicesReport/MI_INDEX"
@@ -68,6 +73,44 @@ def get_json(url, tries=5):
             log("L2-retry", f"{url.rsplit('/',1)[-1]} 第 {i+1}/{tries} 次失敗：{e}；{wait:.1f}s 後重試")
             time.sleep(wait)
     raise RuntimeError(f"取得失敗（已重試 {tries} 次）：{url} — {last}")
+
+
+def soft_json(url, label):
+    """
+    官方端點的「軟」取用：打不通就回 None，不 raise（決策 #27 / R1）。
+
+    只給那四個**有 FinMind 備援可以接手**的來源用。沒有備援的呼叫仍走 get_json()，
+    該死就死 —— 不要把這個函式當成通用的「吞例外」工具。
+
+    RADAR_SIMULATE_DOWN 只給演練用（逗號分隔的來源名稱，或 `all`），
+    與 RADAR_SIMULATE_DATE 同一套紀律：設定時印明顯標記，正常執行絕不設定。
+    """
+    sim_down = os.environ.get("RADAR_SIMULATE_DOWN", "").strip()
+    if sim_down and (sim_down == "all" or label in [s.strip() for s in sim_down.split(",")]):
+        log("L0-SIMULATE", f"演練：強制讓官方端點 {label} 打不通（RADAR_SIMULATE_DOWN）")
+        return None
+    try:
+        return get_json(url)
+    except Exception as e:                                   # noqa: BLE001
+        log("L2-down", f"官方端點 {label} 打不通（已重試）：{e}")
+        return None
+
+
+def notify_degraded(down, day):
+    """
+    條件③：降級絕不沉默。走既有的 notify.telegram（Actions 裡本來就有 secret），
+    不新增任何憑證。送不出去也不阻擋管線 —— 但會在日誌留下痕跡。
+    """
+    try:
+        sys.path.insert(0, HERE)
+        import notify
+        notify.telegram(
+            f"🟠 台股輪動雷達 日線管線降級（L1-degraded-full-finmind）\n"
+            f"{day}：官方端點打不通 {down}\n"
+            f"已改由 FinMind 補齊該部分。完整性閘門（{len(expected_universe())} 檔 / "
+            f"{MIN_COVERAGE:.0%}）照常把關，不合格仍會拒絕發布。")
+    except Exception as e:                                   # noqa: BLE001
+        log("L2-warn", f"降級通知送出失敗（不阻擋管線）：{e}")
 
 
 def roc_to_iso(s):
@@ -207,27 +250,60 @@ def main():
     latest = max(r["date"] for r in rows)
     log("L1-state", f"追蹤 {len(tracked)} 檔，現有最新日期 {latest}，共 {len(rows)} 列")
 
-    twse = get_json(U_TWSE)
-    tpex = get_json(U_TPEX)
-    mi = get_json(U_MI)
-    tptr = get_json(U_TPEXTR)
+    # ── 官方端點：打不通不再讓整條管線陪葬（決策 #27 / R1）────────────────
+    #
+    # 2026-08-14 20:02 的排程跑就死在這裡：STOCK_DAY_ALL 連 5 次回非 JSON，
+    # get_json() raise，管線整條崩潰 —— 而 FinMind 手上其實有完整資料
+    # （6 分鐘後的補跑用它補回 165/165）。舊寫法把「來源落後」與「來源打不通」
+    # 混為一談：只有前者有備援，後者直接死。
+    #
+    # 現在兩者分開處理：
+    #   落後(stale) → 該來源不參與填值，缺的由 FinMind 補（原本就有的行為）
+    #   打不通(down) → 同上，另外標 L1-degraded-full-finmind 並【當次】發 Telegram
+    # **完整性閘門 231 檔 / 95% 完全不因降級放寬**（條件②）——降級只換來源，不換標準。
+    twse = soft_json(U_TWSE, "TWSE個股")
+    tpex = soft_json(U_TPEX, "TPEx個股")
+    mi = soft_json(U_MI, "加權報酬")
+    tptr = soft_json(U_TPEXTR, "櫃買報酬")
 
-    d_twse = roc_to_iso(twse[0]["Date"])
-    d_tpex = roc_to_iso(tpex[0]["Date"])
-    d_mi = roc_to_iso(mi[0]["日期"])
-    d_tptr = roc_to_iso(tptr[-1]["Date"])
-    log("L1-fetch", f"TWSE {len(twse)} 筆({d_twse})　TPEx {len(tpex)} 筆({d_tpex})　"
-                    f"MI_INDEX({d_mi})　TPEx報酬({d_tptr})")
+    d_twse = roc_to_iso(twse[0]["Date"]) if twse else None
+    d_tpex = roc_to_iso(tpex[0]["Date"]) if tpex else None
+    d_mi = roc_to_iso(mi[0]["日期"]) if mi else None
+    d_tptr = roc_to_iso(tptr[-1]["Date"]) if tptr else None
+    srcs = (("TWSE個股", twse, d_twse), ("TPEx個股", tpex, d_tpex),
+            ("加權報酬", mi, d_mi), ("櫃買報酬", tptr, d_tptr))
+    log("L1-fetch", "　".join(f"{n}({d or 'DOWN'})" for n, _, d in srcs))
 
-    # 目標日 = 四來源中最新者；落後的來源改由 FinMind 補（藍圖§四：FinMind 為主來源故障備援）
-    day = max(d_twse, d_tpex, d_mi, d_tptr)
-    stale = [n for n, d in (("TWSE個股", d_twse), ("TPEx個股", d_tpex),
-                            ("加權報酬", d_mi), ("櫃買報酬", d_tptr)) if d != day]
+    down = [n for n, v, _ in srcs if v is None]
+    dates = [d for _, _, d in srcs if d]
+
+    if not dates:
+        # 四個全掛 → 連「目標日是哪一天」都問不到。用台北今日 + 休市日曆推定；
+        # 推不出交易日就安靜結束（不寫入、不告警——那是週末/休市的正常情形）。
+        hol = holiday_map()
+        wd = datetime.strptime(RUN_ID, "%Y-%m-%d").weekday()      # 0=一 … 6=日
+        if wd >= 5 or RUN_ID in hol:
+            log("L7-noop", f"四個官方端點全部打不通，且 {RUN_ID} 非交易日（{'週末' if wd >= 5 else hol.get(RUN_ID) or '休市日'}）"
+                           f" → 不推定目標日，冪等結束")
+            return 0
+        day = RUN_ID
+        log("L1-degraded-full-finmind",
+            f"四個官方端點全部打不通 {down} → 目標日依台北交易日推定為 {day}，全部改由 FinMind 補")
+    else:
+        day = max(dates)
+        if down:
+            log("L1-degraded-full-finmind",
+                f"官方端點打不通 {down} → 該部分改由 FinMind 全補（目標日 {day} 由其餘來源決定）")
+
+    stale = [n for n, v, d in srcs if v is not None and d != day]
     if stale:
         log("L1-stale", f"目標日 {day}，落後的官方來源：{stale} → 將以 FinMind 備援補齊")
     if day <= latest:
         log("L7-noop", f"{day} 已在庫（或非交易日尚未更新），不重複寫入。冪等結束。")
         return 0
+    # 條件③：降級絕不沉默。閘門若接著擋下，工作流本來就會再發一則失敗告警，兩則不衝突。
+    if down:
+        notify_degraded(down, day)
 
     px = {}
     if d_twse == day:

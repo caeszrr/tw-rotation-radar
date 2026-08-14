@@ -48,9 +48,14 @@ const WINDOW_MS = 5000;         // 節流視窗
 const MAX_PER_WINDOW = 3;       // 每 5 秒 ≤3 請求（硬性後盾；批距 5 秒時根本碰不到）
 
 export const FAST = {
-  BATCH_GAP_MS: 5000,       // 批距：刻意做成 1 請求/5 秒，只用掉配額的 1/3
-  ROUND_TARGET_MS: 12000,   // 目標輪距（一輪約 10-11 秒 + 緩衝）→ 每分鐘約 5 輪
-  SLOW_TARGET_MS: 60000,    // 退回模式的輪距
+  // 批距 4 秒（決策 #28 / R2，Caesar 裁決 2026-08-14）。
+  // 仍然守「每 5 秒 ≤3 請求」：3 批排在 t=0/4/8 秒，任何 5 秒視窗內最多 2 個請求，
+  // 只用掉配額的 2/3。一輪 ≈ 8+ 秒 → 輪距約 10-11 秒（先前 5 秒批距是 12.6-14.7 秒）。
+  BATCH_GAP_MS: 4000,
+  BATCH_GAP_SAFE_MS: 5000,  // 退回值：連續 N 輪有批次失敗就回到 5 秒
+  BATCH_FAIL_ROUNDS_TO_WIDEN: 2,
+  ROUND_TARGET_MS: 10000,   // 目標輪距
+  SLOW_TARGET_MS: 60000,    // 退回 60 秒模式的輪距
   MIN_GAP_MS: 1500,         // 下一次 alarm 至少隔這麼久，避免抓取異常快時打爆自己
   STRIKES_TO_DEGRADE: 3,    // 連續 N 輪抓到 0 檔 → 退回 60 秒模式
 };
@@ -139,19 +144,31 @@ export async function pingIntraday(env, suffix = '') {
  * 加上 payload.mode 會傳到前端，畫面直接寫「60 秒模式」——
  * 就算上面三條全斷，使用者眼睛也看得到，不會誤以為自己在看 10 秒級資料。
  */
-export async function alertDegrade(env, reason) {
-  console.log(`L5-degrade 退回 60 秒模式：${reason}`);
+export async function alertWorker(env, text) {
   await pingIntraday(env, '/fail');
   const tok = (env && env.TELEGRAM_BOT_TOKEN ? String(env.TELEGRAM_BOT_TOKEN) : '').trim();
   const chat = (env && env.TELEGRAM_CHAT_ID ? String(env.TELEGRAM_CHAT_ID) : '').trim();
+  // Worker 的 Telegram secret 目前刻意不設（決策 #29 deferred）：
+  // 靠 Healthchecks→Telegram、日線管線的 L6 事後檢查、以及畫面標示三條路。
   if (!tok || !chat) { console.log('L2-warn: Worker 未設 TELEGRAM_BOT_TOKEN/TELEGRAM_CHAT_ID → 本則告警只走 Healthchecks 與畫面標示'); return false; }
   try {
     await fetch(`https://api.telegram.org/bot${tok}/sendMessage`, {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ chat_id: chat, text: `🟠 台股輪動雷達 盤中即時層已退回 60 秒模式\n原因：${reason}\n畫面右上角會標示「60 秒模式」。` }),
+      body: JSON.stringify({ chat_id: chat, text }),
     });
     return true;
   } catch (e) { console.log(`Telegram 告警送出失敗：${e.message}`); return false; }
+}
+
+export async function alertDegrade(env, reason) {
+  console.log(`L5-degrade 退回 60 秒模式：${reason}`);
+  return alertWorker(env, `🟠 台股輪動雷達 盤中即時層已退回 60 秒模式\n原因：${reason}\n畫面右上角會標示「60 秒模式」。`);
+}
+
+/** 批距自動放寬（決策 #28 護欄）：連續 N 輪有批次失敗 → 退回 5 秒批距並告警。 */
+export async function alertWiden(env, reason) {
+  console.log(`L5-widen 批距退回 ${FAST.BATCH_GAP_SAFE_MS}ms：${reason}`);
+  return alertWorker(env, `🟠 台股輪動雷達 盤中批距已自動退回 ${FAST.BATCH_GAP_SAFE_MS / 1000} 秒\n原因：${reason}\n更新頻率會從約 10 秒放慢到約 13 秒；下一個交易日自動重試 ${FAST.BATCH_GAP_MS / 1000} 秒。`);
 }
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -248,6 +265,30 @@ export function nextGap(mode, roundMs) {
   return Math.max(FAST.MIN_GAP_MS, target - roundMs);
 }
 
+/**
+ * 批距狀態機（決策 #28 護欄，純函式好測）。
+ *
+ * 4 秒批距是「對證交所端點的禮貌參數」被主動收緊的結果，所以要有一條路自己走回去：
+ *   連續 BATCH_FAIL_ROUNDS_TO_WIDEN 輪【任一批失敗】→ 退回 5 秒並告警
+ *   中間只要有一輪乾淨 → 連敗歸零（是「連續」，不是「累計」）
+ *   換到新交易日 → 自動重試 4 秒（避免一次瞬時抖動把系統永久釘在保守值）
+ *
+ * 注意：這與 nextMode() 的「抓到 0 檔 → 60 秒模式」是兩層不同的護欄。
+ * 批次失敗但仍抓到資料 → 只放寬批距；整輪抓到 0 檔 → 才降到 60 秒模式。
+ */
+export function nextBatchGap(prev, roundHadFail, tpeYmd) {
+  const cur = (prev && Number(prev.gapMs)) || FAST.BATCH_GAP_MS;
+  const streak = (prev && Number(prev.failStreak)) || 0;
+  const day = prev && prev.tpe;
+  if (cur !== FAST.BATCH_GAP_MS && day && day !== tpeYmd)
+    return { gapMs: FAST.BATCH_GAP_MS, failStreak: 0, event: 'retry', reason: `新交易日自動重試 ${FAST.BATCH_GAP_MS / 1000} 秒批距` };
+  if (!roundHadFail) return { gapMs: cur, failStreak: 0, event: null, reason: '' };
+  const s = streak + 1;
+  if (cur === FAST.BATCH_GAP_MS && s >= FAST.BATCH_FAIL_ROUNDS_TO_WIDEN)
+    return { gapMs: FAST.BATCH_GAP_SAFE_MS, failStreak: s, event: 'widen', reason: `連續 ${s} 輪有批次失敗` };
+  return { gapMs: cur, failStreak: s, event: null, reason: '' };
+}
+
 const J = (o, status = 200) => new Response(JSON.stringify(o), {
   status,
   headers: { 'Content-Type': 'application/json; charset=utf-8', 'Access-Control-Allow-Origin': '*', 'Cache-Control': 'no-store' },
@@ -324,18 +365,21 @@ export class Latest {
     const meta = sim ? ((await this.state.storage.get('meta_sim')) || { mode: 'fast', strikes: 0, tpe: null, kvMin: null }) : await this.load();
     const tpe = taipei(now);
 
+    const gapMs = Number(meta.gapMs) || FAST.BATCH_GAP_MS;
     const t0 = Date.now();
-    const r = await oneRound(universe.ch, throttle(), { gapMs: FAST.BATCH_GAP_MS });
+    const r = await oneRound(universe.ch, throttle(), { gapMs });
     const roundMs = Date.now() - t0;
     const n = Object.keys(r.quotes).length;
 
     const nm = nextMode(meta, n, tpe.ymd);
+    const ng = nextBatchGap(meta, r.fail > 0, tpe.ymd);
     const payload = {
       ts: new Date().toISOString(),
       tpe: tpe.ymd,
       session: 'intraday',
       n, batches_failed: r.fail,
       mode: nm.mode,
+      batch_gap_ms: ng.gapMs,          // 前端據此判斷「是不是已經退回保守批距」
       round_ms: roundMs,
       next_gap_ms: nextGap(nm.mode, roundMs),
       strikes: nm.strikes,
@@ -344,6 +388,7 @@ export class Latest {
     if (sim) payload.sim = true;
     const body = JSON.stringify(payload);
     meta.mode = nm.mode; meta.strikes = nm.strikes; meta.tpe = tpe.ymd;
+    meta.gapMs = ng.gapMs; meta.failStreak = ng.failStreak;
 
     if (sim) {
       // 演練：一律寫影子鍵，不碰正式資料、不發心跳、不發告警
@@ -361,13 +406,15 @@ export class Latest {
       await this.state.storage.put('meta', meta);
       if (nm.event === 'degrade') await alertDegrade(this.env, nm.reason);
       if (nm.event === 'retry') console.log(`L5 ${nm.reason}`);
+      if (ng.event === 'widen') await alertWiden(this.env, ng.reason);
+      if (ng.event === 'retry') console.log(`L5 ${ng.reason}`);
       // 心跳在【寫入之後】才發：抓到 0 檔不算成功，否則心跳綠燈但畫面沒資料。
       // 每分鐘至多一次，不然 Healthchecks 會被打爆。
       if (meta.hcMin !== tpe.minutes) { meta.hcMin = tpe.minutes; await pingIntraday(this.env, n > 0 ? '' : '/fail'); }
     }
 
     const gap = nextGap(nm.mode, roundMs);
-    console.log(`L3${sim ? '-SIM' : ''} 一輪完成：${n} 檔、失敗批 ${r.fail}、耗時 ${roundMs}ms、模式 ${nm.mode}、${gap}ms 後再來`);
+    console.log(`L3${sim ? '-SIM' : ''} 一輪完成：${n} 檔、失敗批 ${r.fail}、耗時 ${roundMs}ms、批距 ${ng.gapMs}ms、模式 ${nm.mode}、${gap}ms 後再來`);
 
     if (sim) {
       sim.left -= 1;
