@@ -974,8 +974,12 @@ function applyClosedChip(hi){
   const age=Math.floor((nowMs()-Date.parse(d+'T13:30:00+08:00'))/86400000);
   if(age>4){ el.textContent='最新收盤 '+d.slice(5)+'（'+age+' 天前）'; el.style.color='#d8a657'; return; }
   const ac=afterCloseToday();
-  // 第 2 態：今天已收盤、尚未定稿（17:50 主跑 / 19:30 補跑，約 18:00 後會更新）
-  if(ac===true){ el.textContent=n.ymd.slice(5)+' 已收盤，定稿約 18:00 後更新'; el.style.color='#d8a657'; return; }
+  /* 第 2 態：今天已收盤、收盤定稿尚未產生。
+     刻意【不】寫「約 18:00 後更新」：排程雖然是台北 17:50 觸發，但 GitHub Actions
+     的 schedule 實測會嚴重延遲 —— 2026-08-13 那一跑 20:06 才起跑、20:14 才寫入
+     （run 31698518885，交接文件誤記為「17:50 實跑成功」）。
+     寫一個做不到的時間，就是換一種方式說謊。實際觀測到的延遲寫在頁尾。 */
+  if(ac===true){ el.textContent=n.ymd.slice(5)+' 已收盤，今晚更新收盤定稿'; el.style.color='#d8a657'; return; }
   // 平日收盤後但拿不到「今天是不是交易日」的證據 → 只說查得到的事實
   if(ac===null){ el.textContent='最新收盤 '+d.slice(5)+' · 今日尚未更新'; el.style.color='#d8a657'; return; }
   el.textContent='最新收盤定稿'; el.style.color='';
@@ -1006,14 +1010,20 @@ function liveBanner(){
 /* 頁尾即時層說明：文案跟著真實模式走，不是寫死的宣傳詞。 */
 function liveNote(){
   const el=$('liveNote'); if(!el) return;
+  // 收盤後、定稿前：把「什麼時候會更新」的實話寫在這裡（chip 空間不夠寫）。
+  if(afterCloseToday()===true){
+    el.innerHTML='<br>今日已收盤，收盤定稿由每日排程產生（台北 17:50 觸發、19:30 補跑）。'
+      +'<b>GitHub 排程實測會延遲</b>：2026-08-13 那一跑 20:14 才落地，所以請以「大日期變成今天」為準，不要以時鐘為準。';
+    return;
+  }
   if(!LIVE_URL){ el.textContent=''; return; }
   const slow=!!(live.data&&live.data.mode==='slow');
   el.innerHTML='<br>'+(slow
-    ? '盤中已退回 <b>60 秒模式</b>（快速模式自動降級，原因見告警訊息）；13:30 後凍結，約 18:00 收盤定稿覆蓋。'
+    ? '盤中已退回 <b>60 秒模式</b>（快速模式自動降級，原因見告警訊息）；13:30 後凍結，當晚由收盤定稿覆蓋。'
     // 「約 13 秒」是 2026-08-14 演練實測值（5 輪，輪距 12.6-14.7 秒），不是估的。
     // 工單原本寫「約 10 秒」，但批距 5 秒 × 3 批的物理下限就是 10 秒再加上網路與寫入，
     // 印 10 秒會是另一種形式的誇大 —— 這次要修的就是這類事。
-    : '盤中約 <b>13 秒</b>更新（來源為證交所約 5 秒快照）；13:30 後凍結，約 18:00 收盤定稿覆蓋。');
+    : '盤中約 <b>13 秒</b>更新（來源為證交所約 5 秒快照）；13:30 後凍結，當晚由收盤定稿覆蓋。');
 }
 
 /* ── 驗收探針 ───────────────────────────────
