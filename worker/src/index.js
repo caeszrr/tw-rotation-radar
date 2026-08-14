@@ -498,6 +498,18 @@ export default {
       //   mode=result   → 讀演練結果
       //   mode=meta     → 讀目前模式／鬧鐘時間
       const mode = u.searchParams.get('mode');
+      /**
+       * mode=ping：從 Worker 內部真的打一次盤中心跳。
+       * 這是唯一能在盤外證明「secret 設對了 + Worker 連得到 hc-ping + URL 沒打錯」的方法
+       * —— 否則要等到週一 09:00 才知道，而那時若沒設對，沉默失敗防護本身就是沉默的。
+       * ⚠️ 有副作用：會讓該 check 開始計時。若 check 用的是 Period 而非 cron schedule，
+       * 盤外沒有後續心跳，Period+Grace 之後就會發出「逾時」通知（見 README/交接文件）。
+       */
+      if (mode === 'ping') {
+        const sent = await pingIntraday(env, u.searchParams.get('fail') === '1' ? '/fail' : '');
+        return J({ ping_sent: sent, configured: !!(env.HC_PING_URL_INTRADAY || '').trim(),
+          note: sent ? '心跳已由 Worker 送出（值不列印）' : 'HC_PING_URL_INTRADAY 未設定或送出失敗' });
+      }
       if (mode && env.LATEST) {
         const stub = env.LATEST.get(env.LATEST.idFromName('latest'));
         const path = mode === 'ensure' ? '/ensure'
