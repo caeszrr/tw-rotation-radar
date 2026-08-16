@@ -3,7 +3,11 @@
 把台股的產業族群與規模風格畫成**相對輪動圖（RRG）**——四象限＋彗星尾巴，
 一眼看出資金正轉進哪裡、轉出哪裡。
 
-**線上頁面**：GitHub Pages（由 `/docs` 供站，見本 repo 的 Pages 設定）
+**線上頁面**：<https://caeszrr.github.io/tw-rotation-radar/>（由 `/docs` 供站）
+
+> 📖 **不打開網站也想完全看懂它？讀 [`WEBSITE_GUIDE.md`](WEBSITE_GUIDE.md)**
+> —— 畫面上每個元素的意思、資料涵蓋範圍、更新節奏、以及**它明確不保證什麼**。
+> 本 README 著重在計算規格與程式結構。
 
 ## 這是什麼
 
