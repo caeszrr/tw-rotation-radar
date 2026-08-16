@@ -129,7 +129,15 @@ input[type=range].tail{flex:1;min-width:110px;accent-color:var(--accent)}
   color:var(--dim);font-size:11.5px}
 .refused b{color:#d8a657}
 
-section.panel{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:12px;margin-top:10px}
+section.panel{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:12px;margin-top:10px;position:relative}
+/* 中/快速播放時蓋住象限變化面板。字級刻意與右上角 chip 一致（11px）、用 --dim 色，
+   目的是「說明」不是「警告」。舊內容同時 visibility:hidden —— 只靠半透明遮罩
+   仍可能隱約讀得到，那就不算「舊內容不可見」。 */
+.pmask{position:absolute;inset:0;display:none;align-items:center;justify-content:center;
+  background:rgba(13,17,23,.94);border-radius:12px;font-size:11px;color:var(--dim);
+  text-align:center;padding:0 14px;z-index:3}
+.pmask.on{display:flex}
+section.panel.masked h2,section.panel.masked .trans{visibility:hidden}
 section.panel h2{margin:0 0 8px;font-size:14px;letter-spacing:.04em}
 section.panel h2 span{color:var(--dim);font-weight:400;font-size:11px;margin-left:6px}
 .trans{display:flex;flex-direction:column;gap:6px;max-height:280px;overflow:auto}
@@ -185,6 +193,7 @@ footer b{color:var(--dim);font-weight:600}
         <button class="mbtn" id="nextDay" title="後一交易日">▶</button>
         <button class="mbtn" id="calBtn" title="日曆">📅</button>
         <button class="mbtn" id="playBtn" title="播放回放">▶</button>
+        <button class="mbtn" id="speedBtn" title="播放速度（慢／中／快）">中</button>
       </div>
       <div class="cal hidden" id="calPopup"></div>
     </div>
@@ -213,9 +222,10 @@ footer b{color:var(--dim);font-weight:600}
   <div class="main"><div id="chart"><div class="loading">載入中…</div><canvas id="tailCv"></canvas></div></div>
   <div class="refused" id="refused" style="display:none"></div>
 
-  <section class="panel">
+  <section class="panel" id="transPanel">
     <h2 id="transTitle">今日象限變化<span>只列事實，不含任何買賣建議</span></h2>
     <div class="trans" id="transList"></div>
+    <div class="pmask" id="transMask">象限變化逐日檢視僅於「慢速」播放時提供</div>
   </section>
 
   <footer>
@@ -416,6 +426,19 @@ let frames=[];                 // [{n,col,pts:[[資料x,資料y]…舊→新], l
 let focusName=null;            // focus+context：聚焦的族群名
 let cvSlow=0, cvDegraded=false;// 效能護欄
 let rafId=null, playing=false, playAcc=0, playLast=0;
+/* ── 播放補間（2026-08-17）────────────────────────────────
+   問題:一格 = 一個交易日,直接跳格時位移太大,眼睛接不上。
+   做法:兩個【真實交易日】之間做【視覺】補間 —— 整條水滴與頭點在一個
+   播放格時間內 ease-in-out 滑過去。
+   **鐵律:絕不製造日內假點。** 補間只存在於 canvas 的繪製座標:
+     frames        永遠是真實收盤資料（hover / Plotly 追蹤點都讀它）
+     tweenFrames   只給 canvas 畫,不進 frames、不進 Plotly、不寫任何地方
+   所以 hover 到的永遠是官方收盤日與官方數值,補間期間也一樣。 */
+let tw=null;                   // {from,to,t0,dur,a,b}
+let tweenFrames=null;          // 只給 canvas 畫的中間態
+let badgeIdx=null;             // 徽章要顯示哪一個真實交易日（null = 用 state.idx）
+let twSlow=0, twDisabled=false;// 補間專用的效能護欄（降級 = 回到直接跳格）
+const EASE=t=>t<0.5?2*t*t:1-Math.pow(-2*t+2,2)/2;   // ease-in-out（二次）
 
 /** 資料座標 → 像素（Plotly 內部軸換算，含繪圖區偏移） */
 function axisMap(){
@@ -485,29 +508,71 @@ function drawTail(c,f,m,alphaMul,thin){
     c.restore();
   }
 }
+/** 圓角矩形路徑（不用 c.roundRect：舊 Safari 沒有，徽章不該挑瀏覽器）。 */
+function roundRectPath(c,x,y,w,h,r){
+  c.beginPath();
+  c.moveTo(x+r,y); c.lineTo(x+w-r,y); c.quadraticCurveTo(x+w,y,x+w,y+r);
+  c.lineTo(x+w,y+h-r); c.quadraticCurveTo(x+w,y+h,x+w-r,y+h);
+  c.lineTo(x+r,y+h); c.quadraticCurveTo(x,y+h,x,y+h-r);
+  c.lineTo(x,y+r); c.quadraticCurveTo(x,y,x+r,y); c.closePath();
+}
+/* ── 圖表內日期徽章（2026-08-17）──────────────────────────
+   起因:手機播放時往下捲就看不到頂部大日期,不知道正在看哪一天。
+   位置刻意壓在繪圖區左上角【再往下 26px】—— 那個角落原本就有
+   「IMPROVING 改善」象限標籤,不能蓋掉它(驗收腳本有一條在量這件事)。
+   內容:靜態=當前檢視日;播放/拖曳/補間=每幀跟著更新;
+        盤中且停在最新一格=「MM-DD 盤中 HH:MM:SS」。 */
+let badgeRect=null;                                        // 給驗收腳本量位置用
+function badgeText(){
+  if(!H) return '';
+  const idx=badgeIdx==null?state.idx:badgeIdx;
+  const d=H.dates[idx]; if(!d) return '';
+  if(LIVE_URL&&isIntraday()&&idx===plottableRange()[1]&&live.data)
+    return tpeNow().ymd.slice(5)+' 盤中 '+new Date(live.at+8*3600e3).toISOString().slice(11,19);
+  return d.slice(5)+' 週'+wdOf(d);
+}
+function drawBadge(c,m){
+  const txt=badgeText(); if(!txt){ badgeRect=null; return; }
+  c.save();
+  c.globalCompositeOperation='source-over';
+  c.font='600 12px system-ui,-apple-system,sans-serif'; c.textBaseline='top';
+  const padX=9,padY=5,h=22,w=Math.ceil(c.measureText(txt).width)+padX*2;
+  // +46：「IMPROVING 改善」是 11px 字、頂端錨定在 y=AX_MAX-0.3，實測含外框約佔
+  // 繪圖區頂端往下 11-30px。原本設 +26 仍會壓到（驗收腳本量出重疊），改 +46 才真的讓開。
+  const x=m.clip.x+10, y=m.clip.y+46;
+  roundRectPath(c,x,y,w,h,6);
+  c.fillStyle='rgba(13,17,23,.74)'; c.fill();
+  c.strokeStyle='rgba(120,140,165,.32)'; c.lineWidth=1; c.stroke();
+  c.fillStyle='#e6edf3'; c.fillText(txt,x+padX,y+padY);
+  c.restore();
+  badgeRect={x,y,w,h,text:txt};
+}
 /** 重畫整層 canvas。回傳耗時 ms（給效能護欄用）。 */
 function paintTails(thin){
   const t0=performance.now();
   const c=ctx2d(), m=axisMap();
   if(!c||!m) return 0;
+  // 補間中畫 tweenFrames，其餘時間畫 frames。frames 永遠是真實收盤資料，不被覆寫。
+  const F = tweenFrames || frames;
   c.save();
   c.beginPath(); c.rect(m.clip.x,m.clip.y,m.clip.w,m.clip.h); c.clip();  // 不畫出繪圖區
   c.globalCompositeOperation=TAIL_BLEND;
   const dim = focusName!=null;
-  for(const f of frames){
+  for(const f of F){
     if(dim && f.n===focusName) continue;                 // 聚焦的最後畫，蓋在最上層
     drawTail(c,f,m, dim?DIM_A:1, thin===true);
   }
-  if(dim){ const f=frames.find(z=>z.n===focusName); if(f) drawTail(c,f,m,1,thin===true); }
+  if(dim){ const f=F.find(z=>z.n===focusName); if(f) drawTail(c,f,m,1,thin===true); }
   if(playing){                                            // 播放中 Plotly 標籤停更，改由 canvas 畫
     c.globalCompositeOperation='source-over';
     c.font='11px system-ui,sans-serif'; c.textBaseline='middle';
-    for(const f of frames){
+    for(const f of F){
       const p=f.pts[f.pts.length-1];
       c.fillStyle=rgba(f.col,0.92);
       c.fillText(f.n, m.x(p[0])+9, m.y(p[1]));
     }
   }
+  drawBadge(c,m);
   c.restore();
   return performance.now()-t0;
 }
@@ -520,11 +585,13 @@ function guardPerf(ms){
 function redrawTails(){ guardPerf(paintTails(playing&&cvDegraded)); }
 
 /** 只重算 frames（資料座標），不碰 Plotly。播放中每格只需要這個 + redrawTails()。 */
-function buildFrames(){
-  const c=combosOf()[key()], ns=names(), i=state.idx;
-  const showLive = !!(LIVE_URL && isIntraday() && state.idx===plottableRange()[1]);
+function buildFrames(){ frames=buildFramesAt(state.idx); return frames; }
+/** 指定索引的 frames（補間需要同時拿到「前一日」與「當日」兩組真實座標）。 */
+function buildFramesAt(i){
+  const c=combosOf()[key()], ns=names();
+  const showLive = !!(LIVE_URL && isIntraday() && i===plottableRange()[1]);
   const tv = showLive ? liveTentative() : null;
-  frames=[];
+  const out=[];
   for(const n of ns){
     const s=c[n], col=colorOf[state.group][n];
     const pts=[],txt=[]; const from=Math.max(0,i-state.tail+1);
@@ -533,9 +600,32 @@ function buildFrames(){
       pts.push([s.rs_ratio[j],s.rs_momentum[j]]); txt.push(H.dates[j]);
     }
     if(!pts.length) continue;
-    frames.push({n,col,pts,txt,live:(tv&&tv[n])?{x:tv[n].x,y:tv[n].y}:null});
+    out.push({n,col,pts,txt,live:(tv&&tv[n])?{x:tv[n].x,y:tv[n].y}:null});
   }
-  return frames;
+  return out;
+}
+/**
+ * 兩組【真實】座標之間的視覺內插。
+ *
+ * 對應方式:A 是 [p(i-L+1)…p(i)]、B 是 [p(i-L+2)…p(i+1)],所以 A[k] 對到 B[k]
+ * 就是「整條水滴往前滑一天」—— 這正是眼睛期待看到的動作。
+ * 兩邊長度不同時(歷史開頭尾巴還在長)一律【從頭部往回】對齊,因為頭是重點。
+ *
+ * 產出物只給 canvas 畫,不寫回 frames、不進 Plotly、不進 history.json。
+ */
+function lerpFrames(a,b,e){
+  const bi=new Map(b.map(f=>[f.n,f]));
+  const out=[];
+  for(const fa of a){
+    const fb=bi.get(fa.n);
+    if(!fb){ continue; }
+    const m=Math.min(fa.pts.length,fb.pts.length);
+    const pa=fa.pts.slice(fa.pts.length-m), pb=fb.pts.slice(fb.pts.length-m);
+    const pts=pa.map((p,k)=>[p[0]+(pb[k][0]-p[0])*e, p[1]+(pb[k][1]-p[1])*e]);
+    out.push({n:fa.n,col:fa.col,pts,txt:fb.txt,live:fb.live});
+  }
+  for(const fb of b) if(!bi.has(fb.n)||!a.some(f=>f.n===fb.n)) out.push(fb);   // 新出現的族群直接用 B
+  return out;
 }
 
 /** 族群標籤（Plotly annotations）。focus+context：聚焦時只留那一條，其餘讓路。 */
@@ -642,10 +732,23 @@ function render(){
 }
 
 /* ── 象限變化 ───────────────────────────── */
+/* 播放時面板的兩種行為（2026-08-17）：
+     慢速(1000ms/格) → 每格跟著刷新，看得完，所以真的刷
+     中/快速         → 整塊蓋住。理由是一格 600ms 甚至 250ms，清單根本讀不完，
+                       留著舊內容比蓋掉更糟：畫面在動、文字沒動，人會以為那是當下那天的變化。
+                       蓋掉並寫明「只有慢速提供」，是把限制講出來，不是把限制藏起來。 */
+function setTransMask(on){
+  const p=$('transPanel'), m=$('transMask');
+  if(!p||!m) return;
+  m.classList.toggle('on',!!on);
+  p.classList.toggle('masked',!!on);
+}
 function renderTrans(){
   const d=H.dates[state.idx];
   const list=(transOf()[key()]||[]).filter(t=>t.date===d && vis[state.group][t.sector]);
-  $('transTitle').innerHTML=(state.idx===plottableRange()[1]?'今日':d+' ')+'象限變化<span>只列事實，不含任何買賣建議</span>';
+  // 播放中一律印 MM-DD：那時「今日」兩個字會騙人（畫面正在走過去的每一天都不是今日）
+  const head = playing ? d.slice(5)+' ' : (state.idx===plottableRange()[1]?'今日':d+' ');
+  $('transTitle').innerHTML=head+'象限變化<span>只列事實，不含任何買賣建議</span>';
   if(!list.length){$('transList').innerHTML='<div class="empty">這一天沒有任何（已顯示的）族群跨越象限。</div>';return;}
   $('transList').innerHTML=list.map(t=>{
     let mark='';
@@ -731,29 +834,71 @@ $('dateSlider').addEventListener('change',e=>{ state.idx=+e.target.value; render
    新版播放中【完全不碰 Plotly】：只重算 frames 與重畫 canvas，族群標籤改由 canvas 畫。
    停格才做一次完整 render() 把 Plotly 標籤與完整水滴補回來。
    明令禁用 Plotly.animate 畫尾巴。                                        */
-const PLAY_MS=300;
+/* 播放速度三檔（決策:一顆按鈕循環，狀態存 localStorage）。
+   數字＝一個交易日格的時間，也就是一次補間的長度。 */
+const SPEEDS=[{lab:'慢',ms:1000},{lab:'中',ms:600},{lab:'快',ms:250}];
+let speedIdx=1;                                   // 預設「中」600ms/格
+// 注意 `+null === 0`：舊寫法沒有先擋 null，沒存過設定的新訪客會被判成 0（慢）。
+// 驗收腳本當場抓到（2026-08-17）——預設值被一個隱式轉型偷換掉，畫面上看不出來。
+try{ const raw=localStorage.getItem('radar.playspeed');
+     if(raw!==null){ const v=+raw; if(Number.isInteger(v)&&v>=0&&v<SPEEDS.length) speedIdx=v; } }catch(e){}
+const playMs=()=>SPEEDS[speedIdx].ms;
+const isSlow=()=>SPEEDS[speedIdx].ms>=1000;      // 只有「慢」才逐日刷新象限變化面板
+function paintSpeedBtn(){ $('speedBtn').textContent=SPEEDS[speedIdx].lab;
+  $('speedBtn').title='播放速度：'+SPEEDS[speedIdx].lab+'（'+SPEEDS[speedIdx].ms+'ms/格）— 點擊切換'; }
+$('speedBtn').onclick=()=>{
+  speedIdx=(speedIdx+1)%SPEEDS.length;
+  try{ localStorage.setItem('radar.playspeed',String(speedIdx)); }catch(e){}
+  paintSpeedBtn();
+  if(playing){ setTransMask(!isSlow()); if(isSlow()) renderTrans(); }   // 播放中切檔立即反映
+};
+paintSpeedBtn();
+
 function stopPlay(){
   if(rafId){ cancelAnimationFrame(rafId); rafId=null; }
   const was=playing; playing=false; playAcc=0; playLast=0;
+  tw=null; tweenFrames=null; badgeIdx=null;
+  setTransMask(false);                            // 停止/停格 → 遮罩移除
   $('playBtn').textContent='▶'; $('playBtn').classList.remove('on');
   if(was) render();                               // 停格 → 完整水滴 + Plotly 標籤回來
 }
+/** 補間專用效能護欄:先讓 v3 既有的重取樣降級去救,還是慢才關掉補間、回到直接跳格。
+    分兩段是因為關補間是「功能消失」,重取樣只是「線細一點」—— 先做便宜的那個。 */
+function guardTween(ms){
+  if(ms>16.67&&cvDegraded){
+    if(++twSlow>=3&&!twDisabled){ twDisabled=true;
+      console.log('[radar] 播放補間降級：連續 3 幀 >16.67ms → 改為直接跳格'); }
+  }else if(ms<=16.67) twSlow=0;
+}
 function playLoop(ts){
   if(!playing) return;
-  if(!playLast) playLast=ts;
-  playAcc+=ts-playLast; playLast=ts;
   const [,ee]=winRange();
-  let moved=false;
-  while(playAcc>=PLAY_MS){
-    playAcc-=PLAY_MS;
+  if(!tw){
     if(state.idx>=ee){ stopPlay(); return; }
-    state.idx++; moved=true;
+    // 兩端都是【真實交易日】的座標，中間那段只是視覺
+    tw={from:state.idx,to:state.idx+1,t0:ts,dur:playMs(),
+        a:buildFramesAt(state.idx),b:buildFramesAt(state.idx+1)};
+    // frames 必須跟著對齊到 tw.from：按下播放時 state.idx 可能剛從終點跳回起點，
+    // 若不補這一行，第一段補間期間 frames 仍是舊那一天的資料 —— hover 讀到的
+    // 就會是別天的數值。驗收腳本的「資料層未被汙染」那條當場抓到。
+    frames=tw.a;
   }
-  if(moved){
+  const raw=Math.min(1,(ts-tw.t0)/tw.dur), done=raw>=1;
+  if(twDisabled){
+    tweenFrames=null;                             // 降級：不畫中間態，時間到才換格
+    badgeIdx=done?tw.to:tw.from;
+  }else{
+    tweenFrames=done?null:lerpFrames(tw.a,tw.b,EASE(raw));
+    badgeIdx=raw>=0.5?tw.to:tw.from;              // 徽章只顯示最近的【真實】交易日
+  }
+  if(done){
+    state.idx=tw.to; tw=null; tweenFrames=null; badgeIdx=null;
     $('dateSlider').value=state.idx; setFill(); setDateLabel(state.idx);
     buildFrames();                                // 只重算資料座標，不碰 Plotly
+    if(isSlow()) renderTrans();                   // 慢速：面板跟著這一格走
   }
-  redrawTails();
+  const ms=paintTails(playing&&cvDegraded);
+  guardPerf(ms); guardTween(ms);
   rafId=requestAnimationFrame(playLoop);
 }
 $('playBtn').onclick=()=>{
@@ -761,7 +906,9 @@ $('playBtn').onclick=()=>{
   const [s,e]=winRange();
   if(state.idx>=e) state.idx=s;                 // 在終點 → 從起點重播
   focusName=null;
-  playing=true; playAcc=0; playLast=0;
+  playing=true; playAcc=0; playLast=0; tw=null; tweenFrames=null; badgeIdx=null;
+  setTransMask(!isSlow());
+  if(isSlow()) renderTrans();                     // 標題立刻換成 MM-DD，不要停在「今日」
   $('playBtn').textContent='⏸'; $('playBtn').classList.add('on');
   try{ Plotly.relayout('chart',{annotations:quadAnnos()}); }catch(e){}  // 標籤交給 canvas
   rafId=requestAnimationFrame(playLoop);
@@ -1039,6 +1186,30 @@ function liveNote(){
 window.__frames=()=>frames; window.__focus=()=>focusName; window.__state=()=>state; window.__H=()=>H;
 window.__playing=()=>playing; window.__paint=t=>paintTails(t===true); window.__degraded=()=>cvDegraded;
 window.__setDegraded=v=>{cvDegraded=!!v;};        // 驗收用：強制走降級路徑，證明它真的畫得出來
+/* 補間與徽章的驗收鉤子（2026-08-17）。__drawn() 是「畫面上正在畫的那組」，
+   __frames() 仍是「真實收盤資料」—— 兩者在補間中必須不同，這正是要驗的事：
+   補間只存在於繪製層，沒有汙染資料層。 */
+window.__drawn=()=>tweenFrames||frames;
+window.__tw=()=>tw&&{from:tw.from,to:tw.to,dur:tw.dur};
+window.__trans=()=>{const m=$('transMask'),p=$('transPanel'),l=$('transList'),l0=l;
+  const mr=m.getBoundingClientRect(), pr=p.getBoundingClientRect();
+  return {title:$('transTitle').textContent, rows:l.querySelectorAll('.tr').length,
+    empty:!!l.querySelector('.empty'), text:l.textContent.trim().slice(0,40),
+    masked:p.classList.contains('masked'), maskOn:getComputedStyle(m).display!=='none',
+    maskText:m.textContent, listVisible:getComputedStyle(l).visibility==='visible',
+    // 要驗的是「內容有沒有被蓋住」，不是「連 1px 邊框都蓋住」。
+    // inset:0 是相對 padding box，面板外框本來就會露出來 —— 那是刻意的，面板輪廓還在。
+    covers: (()=>{const h=$('transTitle').getBoundingClientRect(), l=l0.getBoundingClientRect();
+      const inside=r=>r.left>=mr.left-1&&r.right<=mr.right+1&&r.top>=mr.top-1&&r.bottom<=mr.bottom+1;
+      return inside(h)&&inside(l);})(),
+    panelBox:{w:pr.width,h:pr.height}, maskBox:{w:mr.width,h:mr.height},
+    maskFont:getComputedStyle(m).fontSize, chipFont:getComputedStyle($('liveChip')).fontSize};};
+window.__headsAt=i=>buildFramesAt(i).map(f=>({n:f.n,h:f.pts[f.pts.length-1]}));  // 某一天的真實頭點
+window.__tweening=()=>!!tweenFrames;
+window.__badge=()=>badgeRect;
+window.__speed=()=>({idx:speedIdx,ms:playMs(),lab:SPEEDS[speedIdx].lab});
+window.__tweenOff=()=>twDisabled;
+window.__setTweenOff=v=>{twDisabled=!!v;};       // 驗收用：強制走跳格路徑
 /* 三態日期標示的驗收鉤子（工單 A）。
    __setNow 把時鐘搬到指定時刻並重繪；__setLive 灌一包假的即時資料／交易日答案。
    沒有這兩個，三態只能等到真的那個時刻才驗得到 —— 而那正是「看圖說故事」，
