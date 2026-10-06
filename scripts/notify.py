@@ -91,7 +91,10 @@ def mask():
             continue
         extra = ""
         if name == "TELEGRAM_CHAT_ID":
-            extra = "  形狀=純數字 OK" if v.lstrip("-").isdigit() else "  形狀=非數字（可疑）"
+            # 純數字值:長度＋指紋就能枚舉回原值 → 只印「已設定、是不是純數字」
+            print(f"[notify]   {name:22} 已設定    "
+                  + ("形狀=純數字 OK" if v.lstrip("-").isdigit() else "形狀=非數字（可疑）"))
+            continue
         if name.startswith("HC_PING_URL"):
             extra = "  主機=hc-ping.com OK" if "hc-ping.com/" in v else "  主機非 hc-ping.com（可疑）"
         print(f"[notify]   {name:22} 已設定    長度={len(v):<4} 指紋=sha256:{fp(v)}{extra}")
@@ -104,8 +107,8 @@ def mask():
             with urllib.request.urlopen(req, timeout=20) as r:
                 j = json.loads(r.read().decode("utf-8"))
             b = (j or {}).get("result") or {}
-            print(f"[notify]   getMe 驗證通過 → bot=@{b.get('username')} (id={b.get('id')})  "
-                  f"※ 使用者名稱與 bot id 為公開資訊")
+            # 不印 bot id:它就是 token 冒號前那一段,GitHub 只遮完整值
+            print(f"[notify]   getMe 驗證通過 → bot=@{b.get('username')}  ※ 使用者名稱為公開資訊")
         except Exception as e:                              # noqa: BLE001
             print(f"[notify]   getMe 驗證失敗：{e} —— token 可能無效或已被撤銷")
             ok = False

@@ -21,6 +21,7 @@
 import csv
 import json
 import os
+import re
 import sys
 from collections import defaultdict
 from datetime import datetime, timezone, timedelta
@@ -55,6 +56,11 @@ def log(step, msg):
     print(f"[{datetime.now(TPE).isoformat(timespec='seconds')}] run={RUN_ID} {step}: {msg}", flush=True)
 
 
+def no_token(s):
+    """log／例外訊息裡拿掉 URL 的 token 參數（FinMind 備援把 token 放在 query string）。"""
+    return re.sub(r"[?&]token=[^&\s'\"]*", "", str(s))
+
+
 def get_json(url, tries=5):
     """所有網路呼叫指數退避 + 抖動，只重試暫時性錯誤（L2）。"""
     import random
@@ -70,9 +76,9 @@ def get_json(url, tries=5):
         except Exception as e:                       # noqa: BLE001 — 分類後重試，不吞掉
             last = e
             wait = min(60, 2 ** i) + random.random()
-            log("L2-retry", f"{url.rsplit('/',1)[-1]} 第 {i+1}/{tries} 次失敗：{e}；{wait:.1f}s 後重試")
+            log("L2-retry", no_token(f"{url.rsplit('/',1)[-1]} 第 {i+1}/{tries} 次失敗：{e}；{wait:.1f}s 後重試"))
             time.sleep(wait)
-    raise RuntimeError(f"取得失敗（已重試 {tries} 次）：{url} — {last}")
+    raise RuntimeError(no_token(f"取得失敗（已重試 {tries} 次）：{url} — {last}"))
 
 
 def soft_json(url, label):
@@ -156,7 +162,7 @@ def finmind_fill(codes, day, px):
         try:
             j = get_json("https://api.finmindtrade.com/api/v4/data?" + q, tries=3)
         except Exception as e:                        # noqa: BLE001
-            log("L2-warn", f"FinMind {c} 取得失敗：{e}")
+            log("L2-warn", no_token(f"FinMind {c} 取得失敗：{e}"))
             continue
         for row in (j.get("data") or []):
             if row.get("date") != day:

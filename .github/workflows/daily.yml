@@ -21,11 +21,7 @@ concurrency:
 permissions:
   contents: write
 
-env:
-  TELEGRAM_BOT_TOKEN:   ${{ secrets.TELEGRAM_BOT_TOKEN }}
-  TELEGRAM_CHAT_ID:     ${{ secrets.TELEGRAM_CHAT_ID }}
-  HC_PING_URL_DAILY:    ${{ secrets.HC_PING_URL_DAILY }}
-  FINMIND_TOKEN:        ${{ secrets.FINMIND_TOKEN }}
+# secret 只給需要它的 step（step-level env），不放 workflow 頂層。
 
 jobs:
   build:
@@ -51,6 +47,11 @@ jobs:
       # 不擋管線：缺 token 的紀律一直是「優雅跳過」，不是讓整條線倒下。
       - name: Secrets 自檢（masked，永不印全值）
         continue-on-error: true
+        env:
+          TELEGRAM_BOT_TOKEN:   ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID:     ${{ secrets.TELEGRAM_CHAT_ID }}
+          HC_PING_URL_DAILY:    ${{ secrets.HC_PING_URL_DAILY }}
+          FINMIND_TOKEN:        ${{ secrets.FINMIND_TOKEN }}
         run: python scripts/notify.py mask
 
       - name: L7 休市日曆檢查（TWSE 官方）
@@ -61,14 +62,26 @@ jobs:
         run: python scripts/test_twrrg.py
       - name: 單元測試失敗 → 告警
         if: failure()
+        env:
+          TELEGRAM_BOT_TOKEN:   ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID:     ${{ secrets.TELEGRAM_CHAT_ID }}
+          HC_PING_URL_DAILY:    ${{ secrets.HC_PING_URL_DAILY }}
         run: python scripts/notify.py fail "${{ steps.guard.outputs.run_id }}" "單元測試" "公式護欄測試未通過"
 
       - name: 每日增量 + 完整性閘門
         id: fetch
+        env:
+          TELEGRAM_BOT_TOKEN:   ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID:     ${{ secrets.TELEGRAM_CHAT_ID }}
+          FINMIND_TOKEN:        ${{ secrets.FINMIND_TOKEN }}
         run: python scripts/fetch_daily.py
 
       - name: 閘門/抓取失敗 → 告警（保留上一版成功的 docs/）
         if: failure() && steps.fetch.outcome == 'failure'
+        env:
+          TELEGRAM_BOT_TOKEN:   ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID:     ${{ secrets.TELEGRAM_CHAT_ID }}
+          HC_PING_URL_DAILY:    ${{ secrets.HC_PING_URL_DAILY }}
         run: |
           git checkout -- docs/ data/ || true
           python scripts/notify.py fail "${{ steps.guard.outputs.run_id }}" "每日增量/完整性閘門" \
@@ -105,10 +118,15 @@ jobs:
       - name: L6 盤中即時層事後檢查
         if: always()
         continue-on-error: true
+        env:
+          TELEGRAM_BOT_TOKEN:   ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID:     ${{ secrets.TELEGRAM_CHAT_ID }}
         run: python scripts/check_intraday.py
 
       - name: L4 成功心跳（最後一步；沒有 ping 就是事故）
         if: success()
+        env:
+          HC_PING_URL_DAILY:    ${{ secrets.HC_PING_URL_DAILY }}
         run: python scripts/notify.py ping daily
 
       # 只有手動觸發且勾選才發。排程跑【不會】發成功通知——
@@ -116,12 +134,19 @@ jobs:
       # 真的出事那則就跟著被無視了。日常靠 Healthchecks 的「沒收到就叫」。
       - name: 測試通知（僅手動觸發）
         if: success() && github.event_name == 'workflow_dispatch' && inputs.test_telegram
+        env:
+          TELEGRAM_BOT_TOKEN:   ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID:     ${{ secrets.TELEGRAM_CHAT_ID }}
         run: |
           python scripts/notify.py ok "${{ steps.guard.outputs.run_id }}" \
             "測試通知：三個 Secret 已接上並驗證通過。發布=${{ steps.publish.outputs.published }}。收到這則代表失敗告警管道可用。"
 
       - name: 任一步驟失敗 → 心跳報失敗 + Telegram
         if: failure()
+        env:
+          TELEGRAM_BOT_TOKEN:   ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID:     ${{ secrets.TELEGRAM_CHAT_ID }}
+          HC_PING_URL_DAILY:    ${{ secrets.HC_PING_URL_DAILY }}
         run: |
           python scripts/notify.py ping daily /fail
           python scripts/notify.py fail "${{ steps.guard.outputs.run_id }}" "workflow" "見 Actions 日誌"
