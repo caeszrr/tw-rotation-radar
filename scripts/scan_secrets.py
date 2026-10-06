@@ -86,7 +86,10 @@ def literals(extra):
             elif kind in ("file", "file_abs"):
                 p = name if kind == "file_abs" else os.path.join(ROOT, name)
                 if os.path.exists(p):
-                    out.add(open(p, encoding="utf-8").read().strip())
+                    raw = open(p, "rb").read()
+                    # 依 BOM 解碼（PowerShell 寫出的檔常是 UTF-16），沒有 BOM 就當 UTF-8
+                    enc = "utf-16" if raw[:2] in (b"\xff\xfe", b"\xfe\xff") else "utf-8-sig"
+                    out.add(raw.decode(enc, errors="replace").strip())
             else:
                 p = name if os.path.isabs(name) else os.path.join(ROOT, name)
                 if os.path.exists(p):
