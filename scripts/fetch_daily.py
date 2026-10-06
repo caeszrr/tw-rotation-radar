@@ -57,8 +57,13 @@ def log(step, msg):
 
 
 def no_token(s):
-    """log／例外訊息裡拿掉 URL 的 token 參數（FinMind 備援把 token 放在 query string）。"""
-    return re.sub(r"[?&]token=[^&\s'\"]*", "", str(s))
+    """log／例外訊息裡拿掉 token（FinMind 備援把 token 放在 query string）：
+    FINMIND_TOKEN 有設定時先把值本身換成 ***，再拿掉 token= 參數（大小寫不拘，含編碼後的 token%3D）。"""
+    s = str(s)
+    tok = os.environ.get("FINMIND_TOKEN", "").strip()
+    if tok:
+        s = s.replace(tok, "***")
+    return re.sub(r"(?:[?&]|%3F|%26)?token(?:=|%3D)[^&\s'\"]*", "", s, flags=re.IGNORECASE)
 
 
 def get_json(url, tries=5):

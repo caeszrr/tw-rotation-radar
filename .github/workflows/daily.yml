@@ -42,8 +42,9 @@ jobs:
           echo "run_id=$RUN_ID" >> "$GITHUB_OUTPUT"
           echo "今日(台北) = $RUN_ID"
 
-      # 只印「有沒有設、長度、sha256 指紋」，永不印值或值的任何子字串。
-      # Telegram 另打一次 getMe，真的驗證 token 有效（不只是「有設定」）。
+      # 只印「有沒有設、長度、sha256 指紋」，永不印值或值的任何子字串；
+      # TELEGRAM_CHAT_ID 只印「有沒有設、是不是純數字」（純數字的長度＋指紋可枚舉回原值）。
+      # Telegram 另打一次 getMe，真的驗證 token 有效（不只是「有設定」）；只印 bot 使用者名稱，不印 bot id。
       # 不擋管線：缺 token 的紀律一直是「優雅跳過」，不是讓整條線倒下。
       - name: Secrets 自檢（masked，永不印全值）
         continue-on-error: true

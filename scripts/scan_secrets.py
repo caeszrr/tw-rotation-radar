@@ -114,7 +114,9 @@ def files():
 
 
 def main(argv):
-    extra = argv[argv.index("--literal") + 1:] if "--literal" in argv else []
+    # stdout 是 cp950 pipe（Windows 的 git hook）時 ✅／🔴 編不出來：換成 ? 照印，掃描器不能自己 crash
+    sys.stdout.reconfigure(errors="replace")
+    extra =argv[argv.index("--literal") + 1:] if "--literal" in argv else []
     lits = literals(extra)
     fs = files()
     hits = []
