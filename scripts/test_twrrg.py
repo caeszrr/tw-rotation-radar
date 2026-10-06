@@ -19,6 +19,8 @@ from twrrg import (  # noqa: E402
 )
 
 PASS, FAIL = [], []
+# stdout 是 cp950 pipe（Windows 終端機）時 ≈ 編不出來：換成 ? 照印，測試不能自己 crash
+sys.stdout.reconfigure(errors="replace")
 
 
 def check(name, cond, detail=""):
