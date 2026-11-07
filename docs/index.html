@@ -194,6 +194,7 @@ footer b{color:var(--dim);font-weight:600}
         <button class="mbtn" id="calBtn" title="日曆">📅</button>
         <button class="mbtn" id="playBtn" title="播放回放">▶</button>
         <button class="mbtn" id="speedBtn" title="播放速度（慢／中／快）">中</button>
+        <button class="mbtn" id="sliceBtn" title="每日切幾段（補間，非盤中真實資料）">1段</button>
       </div>
       <div class="cal hidden" id="calPopup"></div>
     </div>
@@ -225,7 +226,7 @@ footer b{color:var(--dim);font-weight:600}
   <section class="panel" id="transPanel">
     <h2 id="transTitle">今日象限變化<span>只列事實，不含任何買賣建議</span></h2>
     <div class="trans" id="transList"></div>
-    <div class="pmask" id="transMask">象限變化逐日檢視僅於「慢速」播放時提供</div>
+    <div class="pmask" id="transMask">象限變化逐日檢視僅於每日播放 ≥ 1 秒時提供（改慢速或多切幾段）</div>
   </section>
 
   <footer>
@@ -437,6 +438,7 @@ let rafId=null, playing=false, playAcc=0, playLast=0;
 let tw=null;                   // {from,to,t0,dur,a,b}
 let tweenFrames=null;          // 只給 canvas 畫的中間態
 let badgeIdx=null;             // 徽章要顯示哪一個真實交易日（null = 用 state.idx）
+let sliceTag='';               // 每日切段時徽章後綴「補間 k/N」；空字串 = 不顯示
 let twSlow=0, twDisabled=false;// 補間專用的效能護欄（降級 = 回到直接跳格）
 const EASE=t=>t<0.5?2*t*t:1-Math.pow(-2*t+2,2)/2;   // ease-in-out（二次）
 
@@ -529,7 +531,7 @@ function badgeText(){
   const d=H.dates[idx]; if(!d) return '';
   if(LIVE_URL&&isIntraday()&&idx===plottableRange()[1]&&live.data)
     return tpeNow().ymd.slice(5)+' 盤中 '+new Date(live.at+8*3600e3).toISOString().slice(11,19);
-  return d.slice(5)+' 週'+wdOf(d);
+  return d.slice(5)+' 週'+wdOf(d)+(sliceTag?' · '+sliceTag:'');
 }
 function drawBadge(c,m){
   const txt=badgeText(); if(!txt){ badgeRect=null; return; }
@@ -842,22 +844,40 @@ let speedIdx=1;                                   // 預設「中」600ms/格
 // 驗收腳本當場抓到（2026-08-17）——預設值被一個隱式轉型偷換掉，畫面上看不出來。
 try{ const raw=localStorage.getItem('radar.playspeed');
      if(raw!==null){ const v=+raw; if(Number.isInteger(v)&&v>=0&&v<SPEEDS.length) speedIdx=v; } }catch(e){}
-const playMs=()=>SPEEDS[speedIdx].ms;
-const isSlow=()=>SPEEDS[speedIdx].ms>=1000;      // 只有「慢」才逐日刷新象限變化面板
+/* 每日切段（2026-11-07，Czr 要求「一天切成幾段，看清楚一天內的移動」）。
+   **資料只有每日收盤，沒有盤中歷史** —— 切段＝把一個交易日格拉長成 N 段，
+   每段 ease-in-out 走完兩個真實收盤之間直線的 1/N。中間全是視覺補間（§7.5 鐵律不變），
+   徽章明寫「補間 k/N」，**不標任何時刻**（標 10:00 會讓人以為是盤中真實位置）。
+   1 段 = 原本行為，逐位元相同。 */
+const SLICES=[1,2,3,5];
+let sliceIdx=0;
+try{ const raw=localStorage.getItem('radar.playslices');
+     if(raw!==null){ const v=+raw; if(Number.isInteger(v)&&v>=0&&v<SLICES.length) sliceIdx=v; } }catch(e){}
+const nSlices=()=>SLICES[sliceIdx];
+const playMs=()=>SPEEDS[speedIdx].ms*nSlices();  // 一個交易日格的總時間 = 每段時間 × 段數
+const isSlow=()=>playMs()>=1000;                 // 每日 ≥1 秒才逐日刷新象限變化面板（原：只有「慢」）
 function paintSpeedBtn(){ $('speedBtn').textContent=SPEEDS[speedIdx].lab;
-  $('speedBtn').title='播放速度：'+SPEEDS[speedIdx].lab+'（'+SPEEDS[speedIdx].ms+'ms/格）— 點擊切換'; }
+  $('speedBtn').title='播放速度：'+SPEEDS[speedIdx].lab+'（'+SPEEDS[speedIdx].ms+'ms/段）— 點擊切換'; }
+function paintSliceBtn(){ $('sliceBtn').textContent=nSlices()+'段';
+  $('sliceBtn').title='每日切 '+nSlices()+' 段（每日 '+playMs()+'ms；中間是補間，非盤中真實資料）— 點擊切換'; }
 $('speedBtn').onclick=()=>{
   speedIdx=(speedIdx+1)%SPEEDS.length;
   try{ localStorage.setItem('radar.playspeed',String(speedIdx)); }catch(e){}
-  paintSpeedBtn();
+  paintSpeedBtn(); paintSliceBtn();
   if(playing){ setTransMask(!isSlow()); if(isSlow()) renderTrans(); }   // 播放中切檔立即反映
 };
-paintSpeedBtn();
+$('sliceBtn').onclick=()=>{
+  sliceIdx=(sliceIdx+1)%SLICES.length;
+  try{ localStorage.setItem('radar.playslices',String(sliceIdx)); }catch(e){}
+  paintSliceBtn();
+  if(playing){ setTransMask(!isSlow()); if(isSlow()) renderTrans(); }   // 下一個交易日格起生效
+};
+paintSpeedBtn(); paintSliceBtn();
 
 function stopPlay(){
   if(rafId){ cancelAnimationFrame(rafId); rafId=null; }
   const was=playing; playing=false; playAcc=0; playLast=0;
-  tw=null; tweenFrames=null; badgeIdx=null;
+  tw=null; tweenFrames=null; badgeIdx=null; sliceTag='';
   setTransMask(false);                            // 停止/停格 → 遮罩移除
   $('playBtn').textContent='▶'; $('playBtn').classList.remove('on');
   if(was) render();                               // 停格 → 完整水滴 + Plotly 標籤回來
@@ -876,7 +896,7 @@ function playLoop(ts){
   if(!tw){
     if(state.idx>=ee){ stopPlay(); return; }
     // 兩端都是【真實交易日】的座標，中間那段只是視覺
-    tw={from:state.idx,to:state.idx+1,t0:ts,dur:playMs(),
+    tw={from:state.idx,to:state.idx+1,t0:ts,dur:playMs(),n:nSlices(),
         a:buildFramesAt(state.idx),b:buildFramesAt(state.idx+1)};
     // frames 必須跟著對齊到 tw.from：按下播放時 state.idx 可能剛從終點跳回起點，
     // 若不補這一行，第一段補間期間 frames 仍是舊那一天的資料 —— hover 讀到的
@@ -884,15 +904,18 @@ function playLoop(ts){
     frames=tw.a;
   }
   const raw=Math.min(1,(ts-tw.t0)/tw.dur), done=raw>=1;
+  // 切段：第 k 段（0 起）在 [k/n,(k+1)/n] 內自己 ease。n=1 時 = EASE(raw)，與原本相同。
+  const u=raw*tw.n, k=Math.min(tw.n-1,Math.floor(u)), e=(k+EASE(u-k))/tw.n;
+  sliceTag=(tw.n>1&&!done)?'補間 '+(k+1)+'/'+tw.n:'';
   if(twDisabled){
     tweenFrames=null;                             // 降級：不畫中間態，時間到才換格
     badgeIdx=done?tw.to:tw.from;
   }else{
-    tweenFrames=done?null:lerpFrames(tw.a,tw.b,EASE(raw));
+    tweenFrames=done?null:lerpFrames(tw.a,tw.b,e);
     badgeIdx=raw>=0.5?tw.to:tw.from;              // 徽章只顯示最近的【真實】交易日
   }
   if(done){
-    state.idx=tw.to; tw=null; tweenFrames=null; badgeIdx=null;
+    state.idx=tw.to; tw=null; tweenFrames=null; badgeIdx=null; sliceTag='';
     $('dateSlider').value=state.idx; setFill(); setDateLabel(state.idx);
     buildFrames();                                // 只重算資料座標，不碰 Plotly
     if(isSlow()) renderTrans();                   // 慢速：面板跟著這一格走
